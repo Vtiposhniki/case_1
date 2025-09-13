@@ -1,149 +1,200 @@
 import os
 import pandas as pd
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 import logging
+from dataclasses import dataclass
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Configuration
+@dataclass
+class Config:
+    """Configuration settings for data preprocessing."""
+    raw_data_path: Path = Path("../data/raw")
+    processed_data_path: Path = Path("../data/processed/")
+    clients_filename: str = "clients.csv"
+    transactions_pattern: str = "transactions"
+    transfers_pattern: str = "transfers"
 
-# Constants
-RAW_DATA_PATH = Path("../data/raw/")
-PROCESSED_DATA_PATH = Path("../data/processed/")
+
+def setup_logging(level: int = logging.INFO) -> logging.Logger:
+    """Set up logging configuration."""
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    return logging.getLogger(__name__)
+
+
+class DataPreprocessorError(Exception):
+    """Custom exception for DataPreprocessor errors."""
+    pass
+
 
 class DataPreprocessor:
     """
-    A class to preprocess and combine transaction and transfer data files.
+    A class to preprocess financial data including clients, transactions, and transfers.
     
-    Attributes:
-        raw_data_path (Path): Path to raw data directory
-        clients (pd.DataFrame): Loaded clients data
-        transactions_files (List[str]): List of transaction file names
-        transfers_files (List[str]): List of transfer file names
-        data_transactions (pd.DataFrame): Combined transactions data
-        data_transfers (pd.DataFrame): Combined transfers data
+    This class handles loading, combining, and exporting various CSV files containing
+    financial data while providing comprehensive error handling and logging.
     """
     
-    def __init__(self, raw_data_path: Path):
+    def __init__(self, config: Optional[Config] = None):
         """
         Initialize the DataPreprocessor.
         
         Args:
-            raw_data_path (Path): Path to the raw data directory
+            config: Configuration object containing paths and settings
+            
+        Raises:
+            DataPreprocessorError: If required directories don't exist or can't be created
         """
-        self.raw_data_path = Path(raw_data_path)
-        self.clients: Optional[pd.DataFrame] = None
-        self.transactions_files: List[str] = []
-        self.transfers_files: List[str] = []
-        self.data_transactions: Optional[pd.DataFrame] = None
-        self.data_transfers: Optional[pd.DataFrame] = None
+        self.config = config or Config()
+        self.logger = setup_logging()
         
-        # Validate path exists
-        if not self.raw_data_path.exists():
-            raise FileNotFoundError(f"Raw data path does not exist: {self.raw_data_path}")
+        # Initialize file lists
+        self._transactions_files: Optional[List[str]] = None
+        self._transfers_files: Optional[List[str]] = None
+        
+        # Initialize data storage
+        self._data_transactions: Optional[pd.DataFrame] = None
+        self._data_transfers: Optional[pd.DataFrame] = None
+        self._clients_data: Optional[pd.DataFrame] = None
+        
+        self._validate_and_create_directories()
     
-    def load_clients(self, filename: str = "clients.csv") -> pd.DataFrame:
+    def _validate_and_create_directories(self) -> None:
+        """Validate that required directories exist and create processed directory if needed."""
+        if not self.config.raw_data_path.exists():
+            raise DataPreprocessorError(f"Raw data path {self.config.raw_data_path} does not exist.")
+        
+        # Create processed directory if it doesn't exist
+        try:
+            self.config.processed_data_path.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Ensured processed data directory exists: {self.config.processed_data_path}")
+        except OSError as e:
+            raise DataPreprocessorError(f"Could not create processed data directory: {e}")
+    
+    def load_clients(self, filename: Optional[str] = None) -> pd.DataFrame:
         """
         Load clients data from CSV file.
         
         Args:
-            filename (str): Name of the clients file
+            filename: Name of the clients file (defaults to config value)
             
         Returns:
-            pd.DataFrame: Loaded clients data
+            DataFrame containing clients data
             
         Raises:
-            FileNotFoundError: If the clients file doesn't exist
+            DataPreprocessorError: If file doesn't exist or can't be loaded
         """
-        clients_path = self.raw_data_path / filename
-        
-        if not clients_path.exists():
-            raise FileNotFoundError(f"Clients file not found: {clients_path}")
+        if filename is None:
+            filename = self.config.clients_filename
             
+        file_path = self.config.raw_data_path / filename
+        
+        if not file_path.exists():
+            raise DataPreprocessorError(f"Clients file {file_path} does not exist.")
+        
         try:
-            self.clients = pd.read_csv(clients_path)
-            logger.info(f"Successfully loaded clients data: {len(self.clients)} records")
-            return self.clients
+            self._clients_data = pd.read_csv(file_path)
+            self.logger.info(f"Successfully loaded {len(self._clients_data)} client records from {filename}")
+            return self._clients_data.copy()
         except Exception as e:
-            logger.error(f"Error loading clients file: {e}")
-            raise
+            error_msg = f"Error loading clients file {filename}: {e}"
+            self.logger.error(error_msg)
+            raise DataPreprocessorError(error_msg) from e
     
     def _discover_files(self, pattern: str) -> List[str]:
         """
-        Discover CSV files matching a pattern in the raw data directory.
+        Discover CSV files matching a specific pattern.
         
         Args:
-            pattern (str): Pattern to match in filename
+            pattern: Pattern to search for in filenames
             
         Returns:
-            List[str]: List of matching file names
+            List of matching filenames
         """
         matching_files = []
         try:
-            for file in self.raw_data_path.glob("*.csv"):
-                if pattern in file.name:
+            for file in self.config.raw_data_path.glob("*.csv"):
+                if pattern.lower() in file.name.lower():
                     matching_files.append(file.name)
-            logger.info(f"Found {len(matching_files)} {pattern} files")
-            return matching_files
+            
+            self.logger.info(f"Found {len(matching_files)} files matching pattern '{pattern}': {matching_files}")
+            return sorted(matching_files)  # Sort for consistent ordering
+            
         except Exception as e:
-            logger.error(f"Error discovering {pattern} files: {e}")
+            self.logger.error(f"Error discovering files with pattern '{pattern}': {e}")
             return []
     
     def discover_transactions(self) -> List[str]:
         """
-        Discover all transaction CSV files.
+        Discover transaction files.
         
         Returns:
-            List[str]: List of transaction file names
+            List of transaction filenames
         """
-        self.transactions_files = self._discover_files("transactions")
-        return self.transactions_files
+        self._transactions_files = self._discover_files(self.config.transactions_pattern)
+        return self._transactions_files.copy()
     
     def discover_transfers(self) -> List[str]:
         """
-        Discover all transfer CSV files.
+        Discover transfer files.
         
         Returns:
-            List[str]: List of transfer file names
+            List of transfer filenames
         """
-        self.transfers_files = self._discover_files("transfers")
-        return self.transfers_files
+        self._transfers_files = self._discover_files(self.config.transfers_pattern)
+        return self._transfers_files.copy()
     
-    def _combine_csv_files(self, file_list: List[str], data_type: str) -> pd.DataFrame:
+    def _combine_files(self, file_list: List[str], data_type: str) -> pd.DataFrame:
         """
         Combine multiple CSV files into a single DataFrame.
         
         Args:
-            file_list (List[str]): List of CSV file names to combine
-            data_type (str): Type of data being combined (for logging)
+            file_list: List of filenames to combine
+            data_type: Type of data being combined (for logging)
             
         Returns:
-            pd.DataFrame: Combined data
+            Combined DataFrame
         """
         if not file_list:
-            logger.warning(f"No {data_type} files found to combine")
+            self.logger.warning(f"No {data_type} files found!")
             return pd.DataFrame()
         
         combined_data = []
-        for file in file_list:
-            file_path = self.raw_data_path / file
+        failed_files = []
+        
+        for filename in file_list:
+            file_path = self.config.raw_data_path / filename
             try:
                 df = pd.read_csv(file_path)
-                # Add source file column for traceability
-                df['source_file'] = file
+                if df.empty:
+                    self.logger.warning(f"File {filename} is empty, skipping")
+                    continue
+                    
                 combined_data.append(df)
-                logger.info(f"Loaded {len(df)} records from {file}")
+                self.logger.info(f"Loaded {len(df)} records from {filename}")
+                
             except Exception as e:
-                logger.error(f"Error loading {file}: {e}")
+                error_msg = f"Error loading {filename}: {e}"
+                self.logger.error(error_msg)
+                failed_files.append(filename)
                 continue
+        
+        if failed_files:
+            self.logger.warning(f"Failed to load {len(failed_files)} {data_type} files: {failed_files}")
         
         if combined_data:
             result = pd.concat(combined_data, ignore_index=True)
-            logger.info(f"Combined {data_type} data: {len(result)} total records from {len(combined_data)} files")
+            self.logger.info(
+                f"Combined {data_type} data: {len(result)} total records from "
+                f"{len(combined_data)} files (out of {len(file_list)} attempted)"
+            )
             return result
         else:
-            logger.warning(f"No valid {data_type} data found")
+            self.logger.warning(f"No valid {data_type} data found")
             return pd.DataFrame()
     
     def combine_transactions(self) -> pd.DataFrame:
@@ -151,123 +202,121 @@ class DataPreprocessor:
         Combine all transaction files into a single DataFrame.
         
         Returns:
-            pd.DataFrame: Combined transactions data
+            Combined transactions DataFrame
         """
-        if not self.transactions_files:
+        if self._transactions_files is None:
             self.discover_transactions()
         
-        self.data_transactions = self._combine_csv_files(self.transactions_files, "transactions")
-        return self.data_transactions
+        self._data_transactions = self._combine_files(self._transactions_files, "transactions")
+        return self._data_transactions.copy() if self._data_transactions is not None else pd.DataFrame()
     
     def combine_transfers(self) -> pd.DataFrame:
         """
         Combine all transfer files into a single DataFrame.
         
         Returns:
-            pd.DataFrame: Combined transfers data
+            Combined transfers DataFrame
         """
-        if not self.transfers_files:
+        if self._transfers_files is None:
             self.discover_transfers()
         
-        self.data_transfers = self._combine_csv_files(self.transfers_files, "transfers")
-        return self.data_transfers
+        self._data_transfers = self._combine_files(self._transfers_files, "transfers")
+        return self._data_transfers.copy() if self._data_transfers is not None else pd.DataFrame()
     
-    def process_all_data(self) -> dict:
+    def _export_file(self, df: pd.DataFrame, filename: str) -> None:
         """
-        Load and process all data files.
+        Export DataFrame to CSV file.
         
-        Returns:
-            dict: Dictionary containing all processed data
+        Args:
+            df: DataFrame to export
+            filename: Output filename
+            
+        Raises:
+            DataPreprocessorError: If export fails
         """
-        logger.info("Starting data processing...")
+        if df.empty:
+            self.logger.warning(f"DataFrame is empty, skipping export of {filename}")
+            return
         
-        # Load clients
+        # Ensure filename has .csv extension
+        if not filename.endswith('.csv'):
+            filename += '.csv'
+        
+        file_path = self.config.processed_data_path / filename
+        
         try:
-            self.load_clients()
+            df.to_csv(file_path, index=False)
+            self.logger.info(f"Successfully exported {len(df)} rows to {file_path}")
         except Exception as e:
-            logger.error(f"Failed to load clients: {e}")
-        
-        # Discover and combine transactions
-        self.discover_transactions()
-        self.combine_transactions()
-        
-        # Discover and combine transfers
-        self.discover_transfers()
-        self.combine_transfers()
-        
-        logger.info("Data processing completed")
-        
-        return {
-            'clients': self.clients,
-            'transactions': self.data_transactions,
-            'transfers': self.data_transfers
-        }
+            error_msg = f"Error exporting to {file_path}: {e}"
+            self.logger.error(error_msg)
+            raise DataPreprocessorError(error_msg) from e
     
-    def get_data_summary(self) -> dict:
+    def export_all_data(self) -> None:
         """
-        Get a summary of all loaded data.
+        Load, combine, and export all data files.
+        
+        This method performs the complete preprocessing pipeline:
+        1. Loads clients data
+        2. Combines transaction files
+        3. Combines transfer files
+        4. Exports all processed data
+        """
+        try:
+            # Load and process all data
+            clients = self.load_clients()
+            transactions = self.combine_transactions()
+            transfers = self.combine_transfers()
+            
+            # Export processed data
+            self._export_file(clients, "clients.csv")
+            self._export_file(transactions, "combined_transactions.csv")
+            self._export_file(transfers, "combined_transfers.csv")
+            
+            self.logger.info("Successfully completed data preprocessing and export")
+            
+        except Exception as e:
+            error_msg = f"Error during data export process: {e}"
+            self.logger.error(error_msg)
+            raise DataPreprocessorError(error_msg) from e
+    
+    def get_summary(self) -> dict:
+        """
+        Get a summary of processed data.
         
         Returns:
-            dict: Summary statistics for each dataset
+            Dictionary containing data summary statistics
         """
-        summary = {}
-        
-        if self.clients is not None:
-            summary['clients'] = {
-                'records': len(self.clients),
-                'columns': list(self.clients.columns)
-            }
-        
-        if self.data_transactions is not None:
-            summary['transactions'] = {
-                'records': len(self.data_transactions),
-                'columns': list(self.data_transactions.columns),
-                'files_processed': len(self.transactions_files)
-            }
-        
-        if self.data_transfers is not None:
-            summary['transfers'] = {
-                'records': len(self.data_transfers),
-                'columns': list(self.data_transfers.columns),
-                'files_processed': len(self.transfers_files)
-            }
-        
+        summary = {
+            'clients_count': len(self._clients_data) if self._clients_data is not None else 0,
+            'transactions_count': len(self._data_transactions) if self._data_transactions is not None else 0,
+            'transfers_count': len(self._data_transfers) if self._data_transfers is not None else 0,
+            'transaction_files': len(self._transactions_files) if self._transactions_files else 0,
+            'transfer_files': len(self._transfers_files) if self._transfers_files else 0
+        }
         return summary
 
 
 def main():
-    """Main function to demonstrate usage."""
+    """Main function to run the data preprocessing."""
     try:
-        # Initialize preprocessor
-        preprocessor = DataPreprocessor(RAW_DATA_PATH)
+        # Create preprocessor with default config
+        preprocessor = DataPreprocessor()
         
-        # Process all data
-        data = preprocessor.process_all_data()
+        # Run the complete preprocessing pipeline
+        preprocessor.export_all_data()
         
-        
-        # Display summary
-        summary = preprocessor.get_data_summary()
+        # Print summary
+        summary = preprocessor.get_summary()
         print("\nData Processing Summary:")
-        print("=" * 50)
-        for data_type, stats in summary.items():
-            print(f"\n{data_type.upper()}:")
-            print(f"  Records: {stats['records']}")
-            print(f"  Columns: {stats['columns']}")
-            if 'files_processed' in stats:
-                print(f"  Files processed: {stats['files_processed']}")
-        
-        # Display first few rows if data exists
-        if preprocessor.data_transactions is not None and not preprocessor.data_transactions.empty:
-            print(f"\nFirst 5 transaction records:")
-            print(preprocessor.data_transactions.head())
-        
-        if preprocessor.data_transfers is not None and not preprocessor.data_transfers.empty:
-            print(f"\nFirst 5 transfer records:")
-            print(preprocessor.data_transfers.head())
+        print("-" * 30)
+        for key, value in summary.items():
+            print(f"{key.replace('_', ' ').title()}: {value}")
             
+    except DataPreprocessorError as e:
+        print(f"Data preprocessing error: {e}")
     except Exception as e:
-        logger.error(f"Error in main execution: {e}")
-        raise
+        print(f"Unexpected error: {e}")
 
 
 if __name__ == "__main__":
