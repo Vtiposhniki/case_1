@@ -4,7 +4,6 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 import pandas as pd
 from pathlib import Path
-import numpy as np
 
 # Configure logging
 logging.basicConfig(
@@ -41,9 +40,9 @@ class TransfersConfig:
 @dataclass(frozen=True)
 class DataPaths:
     """Configuration for data file paths"""
-    clients_path: Path = Path("../data/processed/clients.csv")
-    transactions_path: Path = Path("../data/processed/combined_transactions.csv")
-    transfers_path: Path = Path("../data/processed/combined_transfers.csv")
+    clients_path: Path = Path(__file__).resolve().parent.parent / "data" / "processed" /"clients.csv"
+    transactions_path: Path = Path(__file__).resolve().parent.parent / "data" / "processed" / "combined_transactions.csv"
+    transfers_path: Path = Path(__file__).resolve().parent.parent / "data" /"processed" /"combined_transfers.csv"
 
 
 class FeatureEngineering:
@@ -59,10 +58,10 @@ class FeatureEngineering:
         self.tr_config = transfers_config or TransfersConfig()
         self.data_paths = data_paths or DataPaths()
 
-        # Define column structure
+        # Define column structure (добавляем product в базовые колонки)
         self._base_columns = [
             "client_code", "name", "status", "age", "city",
-            "avg_monthly_balance_KZT", "total_spending", "tx_count", "avg_tx_amount"
+            "avg_monthly_balance_KZT", "product", "total_spending", "tx_count", "avg_tx_amount"
         ]
         self._derived_columns = [
             "travel_spend", "restaurants_spend", "fx_flag", "loan_flag", "high_balance_client"
@@ -91,6 +90,9 @@ class FeatureEngineering:
 
             # Load data
             self.clients = pd.read_csv(self.data_paths.clients_path)
+
+            if "client_id" in self.clients.columns and "client_code" not in self.clients.columns:
+                self.clients = self.clients.rename(columns={"client_id": "client_code"})
             self.transactions = pd.read_csv(self.data_paths.transactions_path)
             self.transfers = pd.read_csv(self.data_paths.transfers_path)
 
@@ -154,6 +156,28 @@ class FeatureEngineering:
 
         return tr_pivot.fillna(0)
 
+    def _prepare_product_features(self) -> pd.DataFrame:
+        """Оставляем только одну текстовую колонку product (первое встреченное значение)"""
+        logger.info("Processing product features...")
+
+        # Собираем client_code и product из обоих файлов
+        prod_tx = self.transactions[
+            ['client_code', 'product']] if 'product' in self.transactions.columns else pd.DataFrame()
+        prod_tr = self.transfers[['client_code', 'product']] if 'product' in self.transfers.columns else pd.DataFrame()
+
+        all_products = pd.concat([prod_tx, prod_tr], ignore_index=True)
+
+        if all_products.empty:
+            return pd.DataFrame()
+
+        # Берём первое встреченное значение product для каждого клиента
+        first_products = (all_products
+                          .dropna(subset=['product'])
+                          .drop_duplicates(subset=['client_code'], keep='first')
+                          .set_index('client_code'))
+
+        return first_products
+
     def _calculate_derived_features(self, features_df: pd.DataFrame) -> pd.DataFrame:
         """Calculate derived features using vectorized operations"""
         logger.info("Calculating derived features...")
@@ -212,11 +236,28 @@ class FeatureEngineering:
             # Process transfer features
             tr_features = self._prepare_transfer_features()
 
+            # Process product features
+            prod_features = self._prepare_product_features()
+
             # Combine all features
             logger.info("Combining features...")
-            self.features_df = pd.concat([base_features, tx_features, tr_features], axis=1)
 
-            # Fill missing values for clients with no transactions/transfers
+            # Начинаем с base_features (у них client_code в индексе)
+            self.features_df = base_features.copy()
+
+            # Добавляем transaction features (join по индексу client_code)
+            if not tx_features.empty:
+                self.features_df = self.features_df.join(tx_features, how='left')
+
+            # Добавляем transfer features
+            if not tr_features.empty:
+                self.features_df = self.features_df.join(tr_features, how='left')
+
+            # Добавляем product features
+            if not prod_features.empty:
+                self.features_df = self.features_df.join(prod_features, how='left')
+
+            # Fill missing values for clients with no transactions/transfers/products
             self.features_df = self.features_df.fillna(0)
 
             # Calculate derived features
@@ -225,20 +266,30 @@ class FeatureEngineering:
             # Reset index to make client_code a column
             self.features_df = self.features_df.reset_index()
 
-            # Ensure proper column order
-            all_columns = (self._base_columns +
-                           self.tx_config.CATEGORIES +
-                           self.tr_config.TYPES +
-                           self._derived_columns)
+            # Получаем список всех колонок, включая динамические product_* колонки
+            base_columns = self._base_columns.copy()
+            category_columns = self.tx_config.CATEGORIES.copy()
+            transfer_columns = self.tr_config.TYPES.copy()
+            derived_columns = self._derived_columns.copy()
 
-            # Reorder columns and fill any missing ones
+            # Получаем product колонки из DataFrame
+            product_columns = [col for col in self.features_df.columns if col.startswith('product_')]
+
+            # Создаем полный список колонок
+            all_columns = base_columns + category_columns + transfer_columns + product_columns + derived_columns
+
+            # Добавляем отсутствующие колонки (кроме product - она текстовая)
             for col in all_columns:
-                if col not in self.features_df.columns:
+                if col not in self.features_df.columns and col != 'product':
                     self.features_df[col] = 0
 
-            self.features_df = self.features_df.reindex(columns=all_columns)
+            # Переупорядочиваем колонки
+            available_columns = [col for col in all_columns if col in self.features_df.columns]
+            self.features_df = self.features_df[available_columns]
 
             logger.info(f"Feature engineering completed. Shape: {self.features_df.shape}")
+            if 'product' in self.features_df.columns:
+                logger.info(f"Product column added with {self.features_df['product'].nunique()} unique products")
             return True
 
         except Exception as e:
@@ -302,7 +353,10 @@ def allow_actions():
     feature_engineer.save_features()
 
     # Display first few rows
-    print("\nFirst 5 rows of features:")
-    print(feature_engineer.features_df.head())
+    # print("\nFirst 5 rows of features:")
+    # print(feature_engineer.features_df.head())
 
     return 0
+
+if __name__ == '__main__':
+    allow_actions()
