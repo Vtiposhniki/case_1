@@ -1,1009 +1,1329 @@
 """
-Система скоринга и рекомендации выгодных предложений для банковских клиентов
-Banking Scoring and Benefits Recommendation System
+Адаптированная система для генерации персонализированных банковских предложений
+Banking Personalized Recommendation System - адаптация под конкретный кейс
 """
-import os
-
 import pandas as pd
 import numpy as np
-import torch
-import torch.nn as nn
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 import logging
-from pathlib import Path
-import json
-
 logger = logging.getLogger(__name__)
 
 
-class RiskLevel(Enum):
-    """Уровни риска клиента"""
-    LOW = "low"
-    MEDIUM = "medium" 
-    HIGH = "high"
-    VERY_HIGH = "very_high"
-
-
-class ClientSegment(Enum):
-    """Сегменты клиентов"""
-    PREMIUM = "premium"           # Премиум клиенты
-    MASS_AFFLUENT = "mass_affluent"  # Состоятельные
-    MASS_MARKET = "mass_market"   # Массовый сегмент
-    BASIC = "basic"               # Базовые клиенты
-    STUDENT = "student"           # Студенты
+class ClientStatus(Enum):
+    """Статусы клиентов"""
+    STUDENT = "Студент"
+    SALARY = "Зарплатный клиент"
+    PREMIUM = "Премиальный клиент"
+    STANDARD = "Стандартный клиент"
 
 
 @dataclass
-class BankingProduct:
-    """Банковский продукт"""
+class BankProduct:
+    """Банковский продукт из кейса"""
     id: str
     name: str
-    category: str  # credit, deposit, card, insurance, investment
-    min_income: float
-    max_risk_level: RiskLevel
-    target_segments: List[ClientSegment]
-    commission_rate: float
-    interest_rate: float
-    requirements: Dict[str, Any]
-    profit_margin: float  # для банка
+    description: str
+    target_behavior_signals: List[str]
+    cashback_categories: List[str] = None
+    cashback_rate: float = 0.0
+    special_conditions: Dict[str, Any] = None
+    min_balance_for_benefits: float = 0.0
 
 
 @dataclass
-class ClientOffer:
-    """Персональное предложение для клиента"""
-    client_code: str
-    product: BankingProduct
-    score: float  # 0-100, вероятность принятия
-    expected_revenue: float  # ожидаемая выручка
-    priority: int  # 1-5, приоритет предложения
-    reasoning: str  # обоснование предложения
-    conditions: Dict[str, Any]  # персональные условия
+class ClientProfile:
+    """Профиль клиента"""
+    client_code: int
+    name: str
+    status: ClientStatus
+    age: int
+    city: str
+    avg_monthly_balance_kzt: float
 
 
-class CreditScoringModel(nn.Module):
-    """PyTorch модель для кредитного скоринга"""
-    
-    def __init__(self, input_dim: int):
-        super(CreditScoringModel, self).__init__()
-        
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            
-            nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            
-            # Выходы для разных типов скоринга
-            nn.Linear(64, 32),
-            nn.ReLU()
-        )
-        
-        # Отдельные головы для разных задач
-        self.credit_risk_head = nn.Sequential(
-            nn.Linear(32, 1),
-            nn.Sigmoid()  # Вероятность дефолта
-        )
-        
-        self.income_estimation_head = nn.Sequential(
-            nn.Linear(32, 1),
-            nn.ReLU()  # Оценка дохода
-        )
-        
-        self.ltv_prediction_head = nn.Sequential(
-            nn.Linear(32, 1),
-            nn.Sigmoid()  # Life Time Value (нормализованный)
-        )
-        
-        self.churn_risk_head = nn.Sequential(
-            nn.Linear(32, 1),
-            nn.Sigmoid()  # Риск оттока
-        )
-    
-    def forward(self, x):
-        features = self.network(x)
-        
-        return {
-            'credit_risk': self.credit_risk_head(features),
-            'income_estimation': self.income_estimation_head(features),
-            'ltv_prediction': self.ltv_prediction_head(features),
-            'churn_risk': self.churn_risk_head(features)
+@dataclass
+class ClientBehavior:
+    """Поведенческие данные клиента"""
+    client_code: int
+    transactions: List[Dict]  # date, category, amount, currency
+    transfers: List[Dict]     # date, type, direction, amount, currency
+    spending_by_category: Dict[str, float]
+    transfer_patterns: Dict[str, float]
+    travel_activity: Dict[str, Any]
+    fx_activity: Dict[str, Any]
+    investment_activity: Dict[str, Any]
+
+
+@dataclass
+class PersonalizedOffer:
+    """Персональное предложение"""
+    client_code: int
+    client_name: str
+    product: BankProduct
+    expected_benefit: float  # ожидаемая выгода в тенге
+    confidence_score: float  # уверенность в подходящести (0-100)
+    push_notification: str
+
+
+class BankingPersonalizationSystem:
+    """Система персонализированных банковских рекомендаций"""
+
+    def __init__(self):
+        self.products_catalog = self._initialize_products()
+        self.spending_categories = [
+            'Одежда и обувь', 'Продукты питания', 'Кафе и рестораны', 'Медицина',
+            'Авто', 'Спорт', 'Развлечения', 'АЗС', 'Кино', 'Питомцы', 'Книги',
+            'Цветы', 'Едим дома', 'Смотрим дома', 'Играем дома', 'Косметика и Парфюмерия',
+            'Подарки', 'Ремонт дома', 'Мебель', 'Спа и массаж', 'Ювелирные украшения',
+            'Такси', 'Отели', 'Путешествия'
+        ]
+
+        # Маппинг категорий трат к продуктам
+        self.category_to_product_mapping = {
+            'travel_card': ['Такси', 'Отели', 'Путешествия'],
+            'premium_card': ['Кафе и рестораны', 'Ювелирные украшения', 'Косметика и Парфюмерия'],
+            'credit_card': ['Продукты питания', 'Одежда и обувь', 'Развлечения', 'Смотрим дома', 'Играем дома'],
+            'fx_exchange': [],  # определяется по валютным операциям
+            'cash_loan': [],    # определяется по паттернам нехватки средств
+            'deposits': [],     # определяется по остаткам
+            'investments': [],  # определяется по инвестиционной активности
+            'gold': []         # определяется по желанию диверсификации
         }
 
-
-class BankingScoringSystem:
-    """Комплексная система скоринга и рекомендаций"""
-    
-    def __init__(self):
-        self.scoring_model: Optional[CreditScoringModel] = None
-        self.feature_scaler = None
-        self.products_catalog = self._initialize_products_catalog()
-        self.client_profiles: Dict[str, Dict] = {}
-        
-    def _initialize_products_catalog(self) -> List[BankingProduct]:
-        """Инициализация каталога банковских продуктов"""
+    def _initialize_products(self) -> List[BankProduct]:
+        """Инициализация каталога продуктов из кейса"""
         return [
-            # Кредитные карты
-            BankingProduct(
-                id="cc_premium",
-                name="Премиум кредитная карта",
-                category="credit_card",
-                min_income=500000,
-                max_risk_level=RiskLevel.MEDIUM,
-                target_segments=[ClientSegment.PREMIUM, ClientSegment.MASS_AFFLUENT],
-                commission_rate=0.02,
-                interest_rate=0.24,
-                requirements={"min_age": 25, "employment_months": 12},
-                profit_margin=0.15
+            BankProduct(
+                id="travel_card",
+                name="Карта для путешествий",
+                description="4% кешбэк на путешествия и такси, привилегии Visa Signature",
+                target_behavior_signals=["frequent_travel", "taxi_usage", "hotel_bookings"],
+                cashback_categories=["Путешествия", "Такси", "Отели"],
+                cashback_rate=0.04
             ),
-            
-            BankingProduct(
-                id="cc_standard",
-                name="Стандартная кредитная карта",
-                category="credit_card",
-                min_income=150000,
-                max_risk_level=RiskLevel.HIGH,
-                target_segments=[ClientSegment.MASS_MARKET, ClientSegment.MASS_AFFLUENT],
-                commission_rate=0.015,
-                interest_rate=0.28,
-                requirements={"min_age": 21, "employment_months": 6},
-                profit_margin=0.12
+
+            BankProduct(
+                id="premium_card",
+                name="Премиальная карта",
+                description="До 4% кешбэк, бесплатные снятия до 3 млн ₸/мес",
+                target_behavior_signals=["high_balance", "frequent_withdrawals", "restaurant_spending"],
+                cashback_categories=["Ювелирные украшения", "Косметика и Парфюмерия", "Кафе и рестораны"],
+                cashback_rate=0.04,
+                min_balance_for_benefits=1000000,
+                special_conditions={
+                    "base_cashback": 0.02,
+                    "enhanced_cashback_1m": 0.03,
+                    "enhanced_cashback_6m": 0.04,
+                    "free_withdrawal_limit": 3000000,
+                    "cashback_limit_monthly": 100000
+                }
             ),
-            
-            # Депозиты
-            BankingProduct(
-                id="deposit_premium",
-                name="Премиум депозит",
-                category="deposit",
-                min_income=200000,
-                max_risk_level=RiskLevel.VERY_HIGH,
-                target_segments=[ClientSegment.PREMIUM, ClientSegment.MASS_AFFLUENT],
-                commission_rate=0.0,
-                interest_rate=0.08,
-                requirements={"min_amount": 1000000},
-                profit_margin=0.03
+
+            BankProduct(
+                id="credit_card",
+                name="Кредитная карта",
+                description="До 10% в любимых категориях, до 2 млн ₸ кредитный лимит",
+                target_behavior_signals=["category_optimization", "online_services", "installment_usage"],
+                cashback_rate=0.10,
+                special_conditions={
+                    "credit_limit": 2000000,
+                    "grace_period_days": 60,
+                    "online_services_cashback": 0.10,
+                    "installment_available": True
+                }
             ),
-            
-            # Потребительские кредиты
-            BankingProduct(
-                id="personal_loan",
-                name="Потребительский кредит",
-                category="personal_loan",
-                min_income=100000,
-                max_risk_level=RiskLevel.MEDIUM,
-                target_segments=[ClientSegment.MASS_MARKET, ClientSegment.MASS_AFFLUENT],
-                commission_rate=0.01,
-                interest_rate=0.18,
-                requirements={"min_age": 23, "employment_months": 6},
-                profit_margin=0.08
+
+            BankProduct(
+                id="fx_exchange",
+                name="Обмен валют",
+                description="Выгодный курс 24/7, авто-покупка по целевому курсу",
+                target_behavior_signals=["fx_transactions", "multi_currency_usage"],
+                special_conditions={
+                    "commission": 0.0,
+                    "auto_buy_available": True,
+                    "24_7_available": True
+                }
             ),
-            
-            # Инвестиционные продукты
-            BankingProduct(
-                id="investment_portfolio",
-                name="Инвестиционный портфель",
-                category="investment",
-                min_income=300000,
-                max_risk_level=RiskLevel.LOW,
-                target_segments=[ClientSegment.PREMIUM, ClientSegment.MASS_AFFLUENT],
-                commission_rate=0.025,
-                interest_rate=0.0,
-                requirements={"min_investment": 500000, "risk_tolerance": "medium"},
-                profit_margin=0.20
+
+            BankProduct(
+                id="cash_loan",
+                name="Кредит наличными",
+                description="До 12% годовых, без справок и залога",
+                target_behavior_signals=["cash_need", "large_purchases"],
+                special_conditions={
+                    "rate_1_year": 0.12,
+                    "rate_over_1_year": 0.21,
+                    "early_repayment_penalty": 0.0
+                }
             ),
-            
-            # Страхование
-            BankingProduct(
-                id="life_insurance",
-                name="Страхование жизни",
-                category="insurance",
-                min_income=80000,
-                max_risk_level=RiskLevel.HIGH,
-                target_segments=[ClientSegment.MASS_MARKET, ClientSegment.MASS_AFFLUENT, ClientSegment.PREMIUM],
-                commission_rate=0.05,
-                interest_rate=0.0,
-                requirements={"min_age": 18, "max_age": 65},
-                profit_margin=0.30
+
+            BankProduct(
+                id="multicurrency_deposit",
+                name="Депозит Мультивалютный",
+                description="14,50% годовых, пополнение и снятие без ограничений",
+                target_behavior_signals=["currency_diversification", "flexible_access_needed"],
+                special_conditions={
+                    "rate": 0.145,
+                    "currencies": ["KZT", "USD", "RUB", "EUR"],
+                    "flexible_access": True
+                }
+            ),
+
+            BankProduct(
+                id="savings_deposit",
+                name="Депозит Сберегательный",
+                description="16,50% годовых, защита KDIF",
+                target_behavior_signals=["high_savings", "long_term_planning"],
+                special_conditions={
+                    "rate": 0.165,
+                    "early_withdrawal": False,
+                    "top_up": False,
+                    "kdif_protection": True
+                }
+            ),
+
+            BankProduct(
+                id="accumulation_deposit",
+                name="Депозит Накопительный",
+                description="15,50% годовых, можно пополнять",
+                target_behavior_signals=["regular_savings", "systematic_accumulation"],
+                special_conditions={
+                    "rate": 0.155,
+                    "top_up": True,
+                    "early_withdrawal": False
+                }
+            ),
+
+            BankProduct(
+                id="investments",
+                name="Инвестиции",
+                description="0% комиссий первый год, от 6 ₸",
+                target_behavior_signals=["small_investment_start", "cost_conscious"],
+                special_conditions={
+                    "commission_first_year": 0.0,
+                    "min_investment": 6,
+                    "withdrawal_commission": 0.0
+                }
+            ),
+
+            BankProduct(
+                id="gold",
+                name="Золотые слитки",
+                description="999,9 пробы, хранение в сейфовых ячейках",
+                target_behavior_signals=["diversification", "long_term_store"],
+                special_conditions={
+                    "purity": 999.9,
+                    "storage_available": True,
+                    "app_preorder": True
+                }
             )
         ]
-    
-    def load_scoring_model(self, model_path: str, scaler_path: str):
-        """Загрузка обученной модели скоринга"""
-        try:
-            # Загружаем чекпоинт
-            checkpoint = torch.load(model_path, map_location='cpu')
-            
-            # Создаем модель (нужно знать размер входа)
-            input_dim = checkpoint.get('input_dim', 50)  # значение по умолчанию
-            self.scoring_model = CreditScoringModel(input_dim)
-            self.scoring_model.load_state_dict(checkpoint['model_state_dict'])
-            self.scoring_model.eval()
-            
-            # Загружаем скейлер
-            import joblib
-            self.feature_scaler = joblib.load(scaler_path)
-            
-            logger.info("Модель скоринга успешно загружена")
-            
-        except Exception as e:
-            logger.error(f"Ошибка загрузки модели: {e}")
-            raise
-    
-    def calculate_client_scores(self, client_features: pd.DataFrame) -> Dict[str, Dict]:
-        """Расчет скоринговых показателей для клиентов"""
-        if self.scoring_model is None:
-            raise ValueError("Модель не загружена. Используйте load_scoring_model()")
-        
-        # Подготавливаем данные
-        feature_columns = [col for col in client_features.columns 
-                          if col not in ['client_code', 'name', 'status', 'city']]
-        
-        X = client_features[feature_columns].values
-        X_scaled = self.feature_scaler.transform(X)
-        
-        # Предсказания модели
-        with torch.no_grad():
-            X_tensor = torch.FloatTensor(X_scaled)
-            predictions = self.scoring_model(X_tensor)
-        
-        # Формируем результаты
-        results = {}
-        
-        for idx, client_code in enumerate(client_features['client_code']):
-            client_data = client_features.iloc[idx]
-            
-            # Базовые скоры
-            credit_risk = float(predictions['credit_risk'][idx])
-            estimated_income = float(predictions['income_estimation'][idx])
-            ltv_score = float(predictions['ltv_prediction'][idx])
-            churn_risk = float(predictions['churn_risk'][idx])
-            
-            # Дополнительные метрики
-            results[client_code] = {
-                'credit_risk_score': min(100, max(0, (1 - credit_risk) * 100)),  # Инвертируем риск
-                'income_estimation': estimated_income * client_data.get('total_spending', 50000),  # Денормализуем
-                'ltv_score': ltv_score * 100,
-                'churn_risk_score': churn_risk * 100,
-                'financial_stability': self._calculate_stability_score(client_data),
-                'engagement_score': self._calculate_engagement_score(client_data),
-                'segment': self._determine_client_segment(client_data, estimated_income)
-            }
-        
-        return results
-    
-    def _calculate_stability_score(self, client_data: pd.Series) -> float:
-        """Расчет индекса финансовой стабильности"""
-        # Базируется на соотношении доходов, расходов и активности
-        balance = client_data.get('avg_monthly_balance_KZT', 0)
-        spending = client_data.get('total_spending', 0)
-        tx_count = client_data.get('tx_count', 0)
-        
-        # Нормализуем показатели
-        balance_score = min(100, balance / 100000)  # Максимум при 10M тенге
-        spending_ratio = spending / max(balance, 1) if balance > 0 else 0
-        activity_score = min(100, tx_count / 10)  # Максимум при 1000+ транзакций
-        
-        # Комбинированный скор
-        stability = (balance_score * 0.4 + 
-                    (1 - min(1, spending_ratio)) * 50 * 0.4 + 
-                    activity_score * 0.2)
-        
-        return min(100, max(0, stability))
-    
-    def _calculate_engagement_score(self, client_data: pd.Series) -> float:
-        """Расчет индекса вовлеченности клиента"""
-        # Базируется на разнообразии операций и использовании продуктов
-        tx_count = client_data.get('tx_count', 0)
-        has_transfers = client_data.get('p2p_out', 0) > 0
-        uses_fx = client_data.get('fx_flag', 0) > 0
-        has_investments = client_data.get('invest_out', 0) > 0
-        
-        # Подсчет активности
-        activity_score = min(100, tx_count / 5)  # Базовая активность
-        diversity_bonus = (has_transfers * 20 + uses_fx * 20 + has_investments * 30)
-        
-        return min(100, activity_score + diversity_bonus)
-    
-    def _determine_client_segment(self, client_data: pd.Series, estimated_income: float) -> ClientSegment:
-        """Определение сегмента клиента"""
-        balance = client_data.get('avg_monthly_balance_KZT', 0)
-        age = client_data.get('age', 30)
-        
-        # Логика сегментации
-        if balance > 5000000 and estimated_income > 1000000:
-            return ClientSegment.PREMIUM
-        elif balance > 1000000 or estimated_income > 500000:
-            return ClientSegment.MASS_AFFLUENT
-        elif age < 25:
-            return ClientSegment.STUDENT
-        elif balance > 100000 or estimated_income > 200000:
-            return ClientSegment.MASS_MARKET
-        else:
-            return ClientSegment.BASIC
-    
-    def generate_personalized_offers(self, 
-                                   client_scores: Dict[str, Dict],
-                                   client_features: pd.DataFrame,
-                                   max_offers_per_client: int = 3) -> Dict[str, List[ClientOffer]]:
-        """Генерация персональных предложений для клиентов"""
-        
-        all_offers = {}
-        
-        for client_code, scores in client_scores.items():
-            client_data = client_features[client_features['client_code'] == client_code].iloc[0]
-            client_offers = []
-            
-            # Определяем подходящие продукты
-            suitable_products = self._filter_suitable_products(scores, client_data)
-            
-            # Ранжируем продукты по привлекательности
-            ranked_products = self._rank_products_for_client(suitable_products, scores, client_data)
-            
-            # Генерируем предложения
-            for i, (product, offer_score) in enumerate(ranked_products[:max_offers_per_client]):
-                offer = self._create_client_offer(
-                    client_code, product, offer_score, scores, client_data, i + 1
-                )
-                client_offers.append(offer)
-            
-            all_offers[client_code] = client_offers
-        
-        return all_offers
-    
-    def _filter_suitable_products(self, scores: Dict, client_data: pd.Series) -> List[BankingProduct]:
-        """Фильтрация подходящих продуктов для клиента"""
-        suitable = []
-        
-        estimated_income = scores['income_estimation']
-        risk_level = self._get_risk_level(scores['credit_risk_score'])
-        segment = scores['segment']
-        age = client_data.get('age', 25)
-        
+
+    def load_client_data(self, profiles_df: pd.DataFrame, transactions_df: pd.DataFrame,
+                        transfers_df: pd.DataFrame) -> Dict[int, Tuple[ClientProfile, ClientBehavior]]:
+        """Загрузка и обработка данных клиентов"""
+        clients_data = {}
+
+        for _, profile_row in profiles_df.iterrows():
+            client_code = profile_row['client_code']
+
+            # Создаем профиль клиента
+            profile = ClientProfile(
+                client_code=client_code,
+                name=profile_row['name'],
+                status=ClientStatus(profile_row['status']),
+                age=profile_row['age'],
+                city=profile_row['city'],
+                avg_monthly_balance_kzt=profile_row['avg_monthly_balance_KZT']
+            )
+
+            # Обрабатываем транзакции
+            client_transactions = transactions_df[transactions_df['client_code'] == client_code]
+            client_transfers = transfers_df[transfers_df['client_code'] == client_code]
+
+            behavior = self._analyze_client_behavior(client_transactions, client_transfers)
+            behavior.client_code = client_code
+
+            clients_data[client_code] = (profile, behavior)
+
+        return clients_data
+
+    def _analyze_client_behavior(self, transactions: pd.DataFrame,
+                               transfers: pd.DataFrame) -> ClientBehavior:
+        """Анализ поведения клиента"""
+
+        # Анализ трат по категориям
+        spending_by_category = {}
+        for category in self.spending_categories:
+            category_spending = transactions[transactions['category'] == category]['amount'].sum()
+            if category_spending > 0:
+                spending_by_category[category] = float(category_spending)
+
+        # Анализ переводов
+        transfer_patterns = {}
+        for _, transfer in transfers.iterrows():
+            transfer_type = transfer['type']
+            direction = transfer['direction']
+            amount = transfer['amount']
+
+            key = f"{transfer_type}_{direction}"
+            if key not in transfer_patterns:
+                transfer_patterns[key] = 0
+            transfer_patterns[key] += float(amount)
+
+        # Анализ активности путешествий
+        travel_spending = (
+            spending_by_category.get('Путешествия', 0) +
+            spending_by_category.get('Отели', 0) +
+            spending_by_category.get('Такси', 0)
+        )
+        travel_activity = {
+            'total_travel_spending': travel_spending,
+            'taxi_count': len(transactions[transactions['category'] == 'Такси']),
+            'hotel_spending': spending_by_category.get('Отели', 0),
+            'travel_spending': spending_by_category.get('Путешествия', 0)
+        }
+
+        # Анализ валютной активности
+        fx_activity = {
+            'fx_buy': transfer_patterns.get('fx_buy_out', 0),
+            'fx_sell': transfer_patterns.get('fx_sell_in', 0),
+            'has_fx_activity': any(key.startswith('fx_') for key in transfer_patterns.keys())
+        }
+
+        # Анализ инвестиционной активности
+        investment_activity = {
+            'invest_out': transfer_patterns.get('invest_out_out', 0),
+            'invest_in': transfer_patterns.get('invest_in_in', 0),
+            'has_investment_activity': any(key.startswith('invest_') for key in transfer_patterns.keys()),
+            'gold_activity': transfer_patterns.get('gold_buy_out', 0) + transfer_patterns.get('gold_sell_in', 0)
+        }
+
+        return ClientBehavior(
+            client_code=0,  # будет установлен позже
+            transactions=transactions.to_dict('records'),
+            transfers=transfers.to_dict('records'),
+            spending_by_category=spending_by_category,
+            transfer_patterns=transfer_patterns,
+            travel_activity=travel_activity,
+            fx_activity=fx_activity,
+            investment_activity=investment_activity
+        )
+
+    def calculate_product_benefits(self, profile: ClientProfile,
+                                 behavior: ClientBehavior) -> Dict[str, Tuple[float, float]]:
+        """Расчет ожидаемой выгоды по каждому продукту"""
+        benefits = {}
+
         for product in self.products_catalog:
-            # Проверяем базовые требования
-            if (estimated_income >= product.min_income and
-                self._risk_level_acceptable(risk_level, product.max_risk_level) and
-                segment in product.target_segments):
-                
-                # Дополнительные проверки
-                if self._check_additional_requirements(product, client_data, age):
-                    suitable.append(product)
-        
-        return suitable
-    
-    def _get_risk_level(self, credit_score: float) -> RiskLevel:
-        """Определение уровня риска по кредитному скору"""
-        if credit_score >= 80:
-            return RiskLevel.LOW
-        elif credit_score >= 60:
-            return RiskLevel.MEDIUM
-        elif credit_score >= 40:
-            return RiskLevel.HIGH
+            expected_benefit, confidence = self.calculate_single_product_benefit(
+                product, profile, behavior
+            )
+            benefits[product.id] = (expected_benefit, confidence)
+
+        return benefits
+
+    def calculate_single_product_benefit(self, product: BankProduct,
+                                        profile: ClientProfile,
+                                        behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды и уверенности для одного продукта"""
+
+        if product.id == "travel_card":
+            return self.calculate_travel_card_benefit(product, profile, behavior)
+        elif product.id == "premium_card":
+            return self.calculate_premium_card_benefit(product, profile, behavior)
+        elif product.id == "credit_card":
+            return self.calculate_credit_card_benefit(product, profile, behavior)
+        elif product.id == "fx_exchange":
+            return self.calculate_fx_benefit(product, profile, behavior)
+        elif product.id == "cash_loan":
+            return self.calculate_cash_loan_benefit(product, profile, behavior)
+        elif product.id in ["multicurrency_deposit", "savings_deposit", "accumulation_deposit"]:
+            return self.calculate_deposit_benefit(product, profile, behavior)
+        elif product.id == "investments":
+            return self.calculate_investment_benefit(product, profile, behavior)
+        elif product.id == "gold":
+            return self.calculate_gold_benefit(product, profile, behavior)
         else:
-            return RiskLevel.VERY_HIGH
-    
-    def _risk_level_acceptable(self, client_risk: RiskLevel, max_product_risk: RiskLevel) -> bool:
-        """Проверка приемлемости уровня риска"""
-        risk_hierarchy = {
-            RiskLevel.LOW: 0,
-            RiskLevel.MEDIUM: 1, 
-            RiskLevel.HIGH: 2,
-            RiskLevel.VERY_HIGH: 3
-        }
-        return risk_hierarchy[client_risk] <= risk_hierarchy[max_product_risk]
-    
-    def _check_additional_requirements(self, product: BankingProduct, 
-                                     client_data: pd.Series, age: int) -> bool:
-        """Проверка дополнительных требований продукта"""
-        reqs = product.requirements
-        
-        # Возрастные ограничения
-        if 'min_age' in reqs and age < reqs['min_age']:
-            return False
-        if 'max_age' in reqs and age > reqs['max_age']:
-            return False
-            
-        # Другие требования можно добавить здесь
-        return True
-    
-    def _rank_products_for_client(self, products: List[BankingProduct], 
-                                scores: Dict, client_data: pd.Series) -> List[Tuple[BankingProduct, float]]:
-        """Ранжирование продуктов по привлекательности для клиента"""
-        
-        ranked = []
-        
-        for product in products:
-            # Рассчитываем скор привлекательности предложения
-            offer_score = self._calculate_offer_score(product, scores, client_data)
-            ranked.append((product, offer_score))
-        
-        # Сортируем по убыванию скора
-        ranked.sort(key=lambda x: x[1], reverse=True)
-        return ranked
-    
-    def _calculate_offer_score(self, product: BankingProduct, 
-                             scores: Dict, client_data: pd.Series) -> float:
-        """Расчет скора привлекательности предложения"""
-        
-        # Базовый скор от кредитного рейтинга и LTV
-        base_score = (scores['credit_risk_score'] * 0.3 + 
-                     scores['ltv_score'] * 0.3 +
-                     scores['engagement_score'] * 0.2 +
-                     (100 - scores['churn_risk_score']) * 0.2)
-        
-        # Бонусы за соответствие продукта
-        category_bonus = self._get_category_bonus(product.category, client_data)
-        
-        # Штраф за высокий риск оттока
-        churn_penalty = scores['churn_risk_score'] * 0.5
-        
-        final_score = base_score + category_bonus - churn_penalty
-        
-        return min(100, max(0, final_score))
-    
-    def _get_category_bonus(self, category: str, client_data: pd.Series) -> float:
-        """Бонус за категорию продукта в зависимости от поведения клиента"""
-        
-        bonuses = {
-            'credit_card': client_data.get('total_spending', 0) / 10000,  # Активные тратят больше
-            'deposit': client_data.get('avg_monthly_balance_KZT', 0) / 100000,  # Высокие балансы
-            'investment': client_data.get('fx_flag', 0) * 20,  # Уже используют валютные операции
-            'insurance': client_data.get('age', 25) / 2,  # Старше = больше потребность
-            'personal_loan': min(20, client_data.get('tx_count', 0) / 10)  # Активность транзакций
-        }
-        
-        return min(30, bonuses.get(category, 0))
-    
-    def _create_client_offer(self, client_code: str, product: BankingProduct,
-                           offer_score: float, scores: Dict, client_data: pd.Series, 
-                           priority: int) -> ClientOffer:
-        """Создание персонального предложения"""
-        
-        # Расчет ожидаемой выручки
-        estimated_revenue = self._calculate_expected_revenue(product, scores, client_data)
-        
-        # Персональные условия
-        conditions = self._generate_personal_conditions(product, scores, client_data)
-        
-        # Обоснование предложения
-        reasoning = self._generate_reasoning(product, scores, client_data)
-        
-        return ClientOffer(
-            client_code=client_code,
-            product=product,
-            score=offer_score,
-            expected_revenue=estimated_revenue,
-            priority=priority,
-            reasoning=reasoning,
-            conditions=conditions
-        )
-    
-    def _calculate_expected_revenue(self, product: BankingProduct, 
-                                  scores: Dict, client_data: pd.Series) -> float:
-        """Расчет ожидаемой выручки от продукта"""
-        
-        # Базовая выручка зависит от типа продукта
-        base_amount = scores['income_estimation'] * 0.1  # 10% от дохода
-        
-        # Корректировки по типу продукта
-        if product.category == 'credit_card':
-            revenue = base_amount * product.interest_rate * 0.3  # 30% использование лимита
-        elif product.category == 'deposit':
-            revenue = client_data.get('avg_monthly_balance_KZT', 0) * 0.02  # 2% маржа банка
-        elif product.category == 'personal_loan':
-            loan_amount = min(base_amount * 5, 3000000)  # До 3М тенге
-            revenue = loan_amount * product.interest_rate * 0.1  # 10% от процентов
-        else:
-            revenue = base_amount * product.profit_margin
-        
-        # Корректировка на вероятность принятия
-        acceptance_probability = scores['credit_risk_score'] / 100 * scores['engagement_score'] / 100
-        
-        return revenue * acceptance_probability
-    
-    def _generate_personal_conditions(self, product: BankingProduct,
-                                    scores: Dict, client_data: pd.Series) -> Dict[str, Any]:
-        """Генерация персональных условий"""
-        
-        conditions = {}
-        
-        # Персональные процентные ставки
-        if product.category in ['credit_card', 'personal_loan']:
-            # Снижаем ставку для низкорискованных клиентов
-            risk_discount = (scores['credit_risk_score'] - 50) / 100 * 0.05
-            conditions['interest_rate'] = max(0.1, product.interest_rate - risk_discount)
-        
-        # Лимиты и суммы
-        if product.category == 'credit_card':
-            credit_limit = min(scores['income_estimation'] * 3, 2000000)
-            conditions['credit_limit'] = credit_limit
-        
-        # Льготные периоды
-        if scores['ltv_score'] > 70:
-            conditions['grace_period_months'] = 3
-            conditions['fee_waiver'] = True
-        
-        return conditions
-    
-    def _generate_reasoning(self, product: BankingProduct,
-                          scores: Dict, client_data: pd.Series) -> str:
-        """Генерация обоснования предложения"""
-        
-        reasons = []
-        
-        if scores['credit_risk_score'] > 70:
-            reasons.append("отличная кредитная история")
-        
-        if scores['engagement_score'] > 60:
-            reasons.append("высокая активность использования банковских продуктов")
-        
-        if scores['financial_stability'] > 80:
-            reasons.append("стабильное финансовое положение")
-        
-        if client_data.get('avg_monthly_balance_KZT', 0) > 500000:
-            reasons.append("значительные денежные средства на счетах")
-        
-        if not reasons:
-            reasons.append("соответствие требованиям продукта")
-        
-        return f"Рекомендуем {product.name} на основе: " + ", ".join(reasons)
-    
-    def save_offers_report(self, offers: Dict[str, List[ClientOffer]], 
-                          output_path: str = "reports/client_offers.json"):
-        """Сохранение отчета с предложениями"""
-        
-        # Подготавливаем данные для сериализации
-        offers_data = {}
-        
-        for client_code, client_offers in offers.items():
-            offers_data[client_code] = []
-            
-            for offer in client_offers:
-                offer_data = {
-                    'product_id': offer.product.id,
-                    'product_name': offer.product.name,
-                    'category': offer.product.category,
-                    'score': round(offer.score, 2),
-                    'expected_revenue': round(offer.expected_revenue, 2),
-                    'priority': offer.priority,
-                    'reasoning': offer.reasoning,
-                    'conditions': offer.conditions
-                }
-                offers_data[client_code].append(offer_data)
-        
-        # Сохраняем в файл
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(offers_data, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"Отчет с предложениями сохранен: {output_path}")
-    
-    def generate_summary_statistics(self, offers: Dict[str, List[ClientOffer]]) -> Dict[str, Any]:
-        """Генерация сводной статистики по предложениям"""
-        
-        total_clients = len(offers)
-        total_offers = sum(len(client_offers) for client_offers in offers.values())
-        total_expected_revenue = sum(
-            offer.expected_revenue 
-            for client_offers in offers.values()
-            for offer in client_offers
-        )
-        
-        # Статистика по категориям продуктов
-        category_stats = {}
-        for client_offers in offers.values():
-            for offer in client_offers:
-                category = offer.product.category
-                if category not in category_stats:
-                    category_stats[category] = {
-                        'count': 0, 
-                        'avg_score': 0, 
-                        'total_revenue': 0
-                    }
-                category_stats[category]['count'] += 1
-                category_stats[category]['avg_score'] += offer.score
-                category_stats[category]['total_revenue'] += offer.expected_revenue
-        
-        # Вычисляем средние значения
-        for category, stats in category_stats.items():
-            stats['avg_score'] = round(stats['avg_score'] / stats['count'], 2)
-            stats['total_revenue'] = round(stats['total_revenue'], 2)
-        
-        return {
-            'total_clients_with_offers': total_clients,
-            'total_offers_generated': total_offers,
-            'avg_offers_per_client': round(total_offers / max(total_clients, 1), 2),
-            'total_expected_revenue': round(total_expected_revenue, 2),
-            'category_breakdown': category_stats
-        }
+            return 0.0, 0.0
+
+    def calculate_travel_card_benefit(self, product: BankProduct,
+                                     profile: ClientProfile,
+                                     behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды от карты для путешествий"""
+
+        travel_spending = behavior.travel_activity['total_travel_spending']
+
+        # Ожидаемый кешбэк за год
+        annual_benefit = travel_spending * product.cashback_rate
+
+        # Уверенность зависит от регулярности поездок
+        taxi_transactions = behavior.travel_activity['taxi_count']
+        confidence = min(100, (taxi_transactions * 10) + (travel_spending / 1000))
+
+        return annual_benefit, confidence
 
 
-def integrate_scoring_with_main_pipeline():
-    """Интеграция системы скоринга с основным пайплайном"""
-    
-    def enhanced_main():
-        """Расширенная версия main() с системой скоринга"""
-        
-        # ... (существующий код обучения моделей) ...
-        
-        logger.info("="*50)
-        logger.info("STEP 4: SCORING AND OFFERS GENERATION")
-        logger.info("="*50)
-        
-        try:
-            # Загружаем обученные данные
-            features_df = pd.read_csv("data/processed/features.csv")
-            
-            # Инициализируем систему скоринга
-            scoring_system = BankingScoringSystem()
-            
-            # Здесь нужно было бы загрузить обученную модель скоринга
-            # scoring_system.load_scoring_model("models/scoring_model.pth", "models/scaler.pkl")
-            
-            # Для демонстрации создаем простые скоры
-            logger.info("Calculating client scores...")
-            mock_scores = {}
-            
-            for _, client in features_df.iterrows():
-                client_code = client['client_code']
-                
-                # Простые эвристические скоры для демонстрации
-                balance = client.get('avg_monthly_balance_KZT', 0)
-                spending = client.get('total_spending', 0)
-                tx_count = client.get('tx_count', 0)
-                
-                mock_scores[client_code] = {
-                    'credit_risk_score': min(100, max(0, balance / 10000 + tx_count / 10)),
-                    'income_estimation': spending * 2,  # Примерная оценка
-                    'ltv_score': min(100, balance / 50000 + spending / 5000),
-                    'churn_risk_score': max(0, 50 - tx_count / 2),
-                    'financial_stability': scoring_system._calculate_stability_score(client),
-                    'engagement_score': scoring_system._calculate_engagement_score(client),
-                    'segment': scoring_system._determine_client_segment(client, spending * 2)
-                }
-            
-            # Генерируем персональные предложения
-            logger.info("Generating personalized offers...")
-            offers = scoring_system.generate_personalized_offers(mock_scores, features_df)
-            
-            # Сохраняем отчеты
-            scoring_system.save_offers_report(offers)
-            
-            # Генерируем статистику
-            summary_stats = scoring_system.generate_summary_statistics(offers)
-            
-            logger.info("Scoring and Offers Summary:")
-            for key, value in summary_stats.items():
-                if key == 'category_breakdown':
-                    logger.info(f"{key}:")
-                    for category, stats in value.items():
-                        logger.info(f"  {category}: {stats['count']} offers, "
-                                  f"avg score: {stats['avg_score']}, "
-                                  f"revenue: {stats['total_revenue']:,.0f} KZT")
+    def calculate_premium_card_benefit(self, product: BankProduct,
+                                      profile: ClientProfile,
+                                      behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды от премиальной карты"""
+
+        balance = profile.avg_monthly_balance_kzt
+        conditions = product.special_conditions
+
+        # Определяем уровень кешбэка в зависимости от баланса
+        if balance >= 6000000:
+            cashback_rate = conditions['enhanced_cashback_6m']
+        elif balance >= 1000000:
+            cashback_rate = conditions['enhanced_cashback_1m']
+        else:
+            cashback_rate = conditions['base_cashback']
+
+        # Расчет кешбэка с премиум категорий
+        premium_categories_spending = sum(
+            behavior.spending_by_category.get(cat, 0)
+            for cat in product.cashback_categories
+        )
+
+        total_spending = sum(behavior.spending_by_category.values())
+
+        # Ежемесячный кешбэк (с учетом лимита)
+        monthly_premium_cashback = premium_categories_spending * product.cashback_rate / 12
+        monthly_base_cashback = (total_spending - premium_categories_spending) * cashback_rate / 12
+        monthly_total_cashback = min(
+            monthly_premium_cashback + monthly_base_cashback,
+            conditions['cashback_limit_monthly']
+        )
+
+        annual_cashback_benefit = monthly_total_cashback * 12
+
+        # Выгода от бесплатных снятий (если есть активность снятий)
+        withdrawal_activity = behavior.transfer_patterns.get('atm_withdrawal_out', 0)
+        annual_withdrawal_savings = (withdrawal_activity * 0.02)  # предполагаем 2% комиссия
+
+        total_benefit = annual_cashback_benefit + annual_withdrawal_savings
+
+        confidence = min(100, (balance / 100000) + (total_spending / 10000))
+
+        return total_benefit, confidence
+
+    def calculate_credit_card_benefit(self, product: BankProduct,
+                                     profile: ClientProfile,
+                                     behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды от кредитной карты"""
+
+        # Находим топ-3 категории трат
+        sorted_spending = sorted(
+            behavior.spending_by_category.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:3]
+
+        top_categories_spending = sum(amount for _, amount in sorted_spending)
+
+        # Онлайн-сервисы (примерно оцениваем)
+        online_categories = ['Смотрим дома', 'Играем дома', 'Кино']
+        online_spending = sum(
+            behavior.spending_by_category.get(cat, 0)
+            for cat in online_categories
+        )
+
+        # Ожидаемый кешбэк
+        monthly_top_categories_cashback = (top_categories_spending / 3) * product.cashback_rate
+        monthly_online_cashback = (online_spending / 3) * product.cashback_rate
+        annual_benefit = (monthly_top_categories_cashback + monthly_online_cashback) * 12
+
+        # Выгода от рассрочки (сложно оценить, добавляем бонус при активном использовании)
+        installment_activity = behavior.transfer_patterns.get('installment_payment_out', 0)
+        if installment_activity > 0:
+            annual_benefit += 5000  # условная выгода от рассрочки
+
+        # Уверенность зависит от разнообразия трат и их объема
+        categories_count = len([v for v in behavior.spending_by_category.values() if v > 1000])
+        confidence = min(100, categories_count * 15 + (top_categories_spending / 5000))
+
+        return annual_benefit, confidence
+
+    def calculate_fx_benefit(self, product: BankProduct,
+                            profile: ClientProfile,
+                            behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды от валютного обмена"""
+
+        fx_volume = behavior.fx_activity['fx_buy'] + behavior.fx_activity['fx_sell']
+        if fx_volume == 0:
+            return 0.0, 0.0
+
+        # Определяем основную валюту по переводам
+        main_currency = None
+        if behavior.transfers:
+            currencies = [t['currency'] for t in behavior.transfers if 'currency' in t]
+            if currencies:
+                main_currency = max(set(currencies), key=currencies.count)
+
+        # Предполагаем экономию 0.5% от объема операций за счет выгодного курса
+        annual_savings = fx_volume * 0.005
+
+        confidence = min(100, fx_volume / 10000 + 20)
+
+        return annual_savings, confidence
+
+    def calculate_cash_loan_benefit(self, product: BankProduct,
+                                   profile: ClientProfile,
+                                   behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды от кредита наличными"""
+
+        # Ищем признаки потребности в кредите
+        large_purchases = sum(1 for t in behavior.transactions if t['amount'] > 100000)
+        balance = profile.avg_monthly_balance_kzt
+        total_spending = sum(behavior.spending_by_category.values())
+
+        # Кредит выгоден только при явной потребности
+        if large_purchases == 0 and balance > total_spending:
+            return 0.0, 10.0  # низкая уверенность даже при нулевой выгоде
+
+        # Условная выгода от доступности кредита (сложно оценить денежно)
+        potential_benefit = 10000  # условная оценка удобства
+
+        # Уверенность зависит от признаков потребности в кредите
+        confidence = min(100, large_purchases * 20 + max(0, (total_spending - balance) / 1000))
+
+        return potential_benefit, confidence
+
+    def calculate_deposit_benefit(self, product: BankProduct,
+                                 profile: ClientProfile,
+                                 behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды от депозитов"""
+
+        balance = profile.avg_monthly_balance_kzt
+        conditions = product.special_conditions
+
+        if balance < 50000:  # минимальная сумма для депозита
+            return 0.0, 0.0
+
+        # Оцениваем свободные средства (остаток минус месячные траты)
+        monthly_spending = sum(behavior.spending_by_category.values()) / 3
+        free_funds = max(0, balance - monthly_spending * 2)  # оставляем 2-месячный запас
+
+        # Годовой доход от депозита
+        annual_income = free_funds * conditions['rate']
+
+        # Уверенность зависит от стабильности остатков и объема свободных средств
+        confidence = min(100, (free_funds / 100000) * 20 + 30)
+
+        # Корректировка уверенности в зависимости от типа депозита
+        if product.id == "savings_deposit" and not conditions.get('flexible_access'):
+            confidence *= 0.8  # снижаем для строгого депозита
+
+        return annual_income, confidence
+
+    def calculate_investment_benefit(self, product: BankProduct,
+                                    profile: ClientProfile,
+                                    behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды от инвестиций"""
+
+        balance = profile.avg_monthly_balance_kzt
+        has_investment_experience = behavior.investment_activity['has_investment_activity']
+
+        # Условная выгода от инвестиций (сложно предсказать доходность)
+        potential_investment_amount = min(balance * 0.1, 100000)  # до 10% от баланса
+        expected_annual_return = potential_investment_amount * 0.1  # условные 10% годовых
+
+        # Экономия на комиссиях в первый год
+        commission_savings = potential_investment_amount * 0.01  # 1% экономия
+
+        total_benefit = expected_annual_return + commission_savings
+
+        # Уверенность зависит от опыта и возраста
+        base_confidence = 30
+        if has_investment_experience:
+            base_confidence += 30
+        if profile.age >= 25 and profile.age <= 45:
+            base_confidence += 20
+        if balance > 200000:
+            base_confidence += 20
+
+        confidence = min(100, base_confidence)
+
+        return total_benefit, confidence
+
+    def calculate_gold_benefit(self, product: BankProduct,
+                              profile: ClientProfile,
+                              behavior: ClientBehavior) -> Tuple[float, float]:
+        """Расчет выгоды от золотых слитков"""
+
+        balance = profile.avg_monthly_balance_kzt
+        has_diversification_activity = (
+            behavior.fx_activity['has_fx_activity'] or
+            behavior.investment_activity['has_investment_activity']
+        )
+
+        if balance < 500000:  # минимальная сумма для золота
+            return 0.0, 0.0
+
+        # Условная выгода от диверсификации (защита от инфляции)
+        potential_gold_investment = min(balance * 0.05, 200000)  # до 5% портфеля
+        annual_benefit = potential_gold_investment * 0.03  # условная защита от инфляции
+
+        # Уверенность зависит от склонности к диверсификации
+        confidence = 20
+        if has_diversification_activity:
+            confidence += 40
+        if balance > 1000000:
+            confidence += 30
+        if profile.status in [ClientStatus.PREMIUM, ClientStatus.SALARY]:
+            confidence += 20
+
+        confidence = min(100, confidence)
+
+        return annual_benefit, confidence
+
+    def select_best_product(self, benefits: Dict[str, Tuple[float, float]]) -> str:
+        """Выбор наилучшего продукта на основе выгоды и уверенности"""
+
+        best_product = None
+        best_score = 0
+
+        for product_id, (benefit, confidence) in benefits.items():
+            # Комбинированный скор: выгода * уверенность
+            score = benefit * (confidence / 100)
+
+            if score > best_score:
+                best_score = score
+                best_product = product_id
+
+        return best_product
+
+    def normalize_push_length(self, text: str) -> str:
+        """Приведение push-уведомления к длине 180–220 символов"""
+        if len(text) < 180:
+            extra = " Подробнее в приложении."
+            while len(text + extra) < 180:
+                extra += " Узнайте больше."
+            text += extra
+        elif len(text) > 220:
+            text = text[:217] + "..."
+        return text
+
+    def generate_push_notification(self, profile: ClientProfile,
+                                 behavior: ClientBehavior,
+                                 product: BankProduct,
+                                 expected_benefit: float) -> str:
+        """Генерация персонализированного push-уведомления"""
+
+        templates = {
+            "travel_card": self._generate_travel_card_push,
+            "premium_card": self._generate_premium_card_push,
+            "credit_card": self._generate_credit_card_push,
+            "fx_exchange": self._generate_fx_push,
+            "cash_loan": self._generate_cash_loan_push,
+            "multicurrency_deposit": self._generate_deposit_push,
+            "savings_deposit": self._generate_deposit_push,
+            "accumulation_deposit": self._generate_deposit_push,
+            "investments": self._generate_investment_push,
+            "gold": self._generate_gold_push
+        }
+
+        generator = templates.get(product.id)
+        if generator:
+            push = generator(profile, behavior, product, expected_benefit)
+        else:
+            push = f"{profile.name}, рекомендуем {product.name}. Подробнее в приложении."
+
+        return self.normalize_push_length(push)
+
+    def _generate_travel_card_push(self, profile: ClientProfile,
+                                 behavior: ClientBehavior,
+                                 product: BankProduct,
+                                 expected_benefit: float) -> str:
+        """Генерация уведомления для карты путешествий"""
+
+        taxi_count = behavior.travel_activity['taxi_count']
+        taxi_spending = behavior.spending_by_category.get('Такси', 0)
+
+        if taxi_count > 0 and taxi_spending > 0:
+            monthly_cashback = (taxi_spending * 0.04) / 3
+            return (f"{profile.name}, в последние месяцы вы сделали {taxi_count} поездок на такси "
+                   f"на {taxi_spending:,.0f} ₸. С картой для путешествий вернули бы "
+                   f"≈{monthly_cashback:,.0f} ₸ ежемесячно. Откройте карту в приложении.")
+
+        travel_spending = behavior.travel_activity['total_travel_spending']
+        if travel_spending > 0:
+            return (f"{profile.name}, ваши расходы на поездки составили {travel_spending:,.0f} ₸. "
+                   f"Карта для путешествий вернула бы 4% кешбэком. Оформить карту.")
+
+        return f"{profile.name}, карта для путешествий даст 4% кешбэк на поездки и такси. Узнать подробнее."
+
+    def _generate_premium_card_push(self, profile: ClientProfile,
+                                  behavior: ClientBehavior,
+                                  product: BankProduct,
+                                  expected_benefit: float) -> str:
+        """Генерация уведомления для премиальной карты"""
+
+        balance = profile.avg_monthly_balance_kzt
+        restaurant_spending = behavior.spending_by_category.get('Кафе и рестораны', 0)
+
+        if balance > 1000000:
+            return (f"{profile.name}, у вас стабильно крупный остаток {balance:,.0f} ₸. "
+                   f"Премиальная карта даст до 4% кешбэк и бесплатные снятия до 3 млн ₸/мес. "
+                   f"Оформить сейчас.")
+
+        if restaurant_spending > 10000:
+            return (f"{profile.name}, ваши траты в ресторанах {restaurant_spending:,.0f} ₸ дают "
+                   f"право на премиальную карту с повышенным кешбэком. Подключить карту.")
+
+        return (f"{profile.name}, премиальная карта подойдет для ваших трат — "
+               f"до 4% кешбэк и привилегии. Оформить карту.")
+
+    def _generate_credit_card_push(self, profile: ClientProfile,
+                                 behavior: ClientBehavior,
+                                 product: BankProduct,
+                                 expected_benefit: float) -> str:
+        """Генерация уведомления для кредитной карты"""
+
+        # Находим топ-3 категории
+        sorted_spending = sorted(
+            behavior.spending_by_category.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:3]
+
+        if len(sorted_spending) >= 3:
+            top_categories = [cat for cat, _ in sorted_spending[:3]]
+            return (f"{profile.name}, ваши топ-категории — {', '.join(top_categories)}. "
+                   f"Кредитная карта даёт до 10% в любимых категориях и на онлайн-сервисы. "
+                   f"Оформить карту.")
+
+        online_spending = sum(
+            behavior.spending_by_category.get(cat, 0)
+            for cat in ['Смотрим дома', 'Играем дома', 'Кино']
+        )
+
+        if online_spending > 5000:
+            return (f"{profile.name}, вы тратите на онлайн-сервисы {online_spending:,.0f} ₸. "
+                   f"Кредитная карта вернет 10% с таких покупок. Оформить карту.")
+
+        return (f"{profile.name}, кредитная карта даст до 10% кешбэк в выбранных категориях "
+               f"и на онлайн-покупки. Узнать условия.")
+
+    def _generate_fx_push(self, profile: ClientProfile,
+                        behavior: ClientBehavior,
+                        product: BankProduct,
+                        expected_benefit: float) -> str:
+        """Генерация уведомления для обмена валют"""
+
+        fx_volume = behavior.fx_activity['fx_buy'] + behavior.fx_activity['fx_sell']
+
+        # Определяем основную валюту операций
+        main_currency = "USD"  # упрощение, в реальности нужен анализ
+
+        if fx_volume > 0:
+            return (f"{profile.name}, вы часто меняете валюту на {fx_volume:,.0f} ₸. "
+                   f"В приложении выгодный курс без комиссий и авто-покупка по целевому курсу. "
+                   f"Настроить обмен.")
+
+        # Ищем траты в валюте (условно по категориям путешествий)
+        travel_spending = behavior.travel_activity.get('total_travel_spending', 0)
+        if travel_spending > 10000:
+            return (f"{profile.name}, при ваших тратах на поездки выгодно менять валюту "
+                   f"по лучшему курсу в приложении. Настроить автообмен.")
+
+        return f"{profile.name}, удобный обмен валют 24/7 с выгодным курсом в приложении. Попробовать."
+
+    def _generate_cash_loan_push(self, profile: ClientProfile,
+                               behavior: ClientBehavior,
+                               product: BankProduct,
+                               expected_benefit: float) -> str:
+        """Генерация уведомления для кредита наличными"""
+
+        # Осторожно с кредитными предложениями - только при явной потребности
+        large_purchases = sum(1 for t in behavior.transactions if t['amount'] > 100000)
+
+        if large_purchases > 0:
+            return (f"{profile.name}, для крупных покупок доступен кредит наличными "
+                   f"до 12% годовых без справок. Узнать доступный лимит.")
+
+        return (f"{profile.name}, кредит наличными до 12% с гибким погашением "
+               f"и без скрытых комиссий. Рассчитать условия.")
+
+    def _generate_deposit_push(self, profile: ClientProfile,
+                             behavior: ClientBehavior,
+                             product: BankProduct,
+                             expected_benefit: float) -> str:
+        """Генерация уведомления для депозитов"""
+
+        balance = profile.avg_monthly_balance_kzt
+        monthly_spending = sum(behavior.spending_by_category.values()) / 3
+
+        if balance > monthly_spending * 3:
+            deposit_rate = product.special_conditions['rate']
+            potential_income = balance * 0.5 * deposit_rate  # 50% свободных средств
+
+            deposit_names = {
+                'multicurrency_deposit': 'мультивалютный депозит',
+                'savings_deposit': 'сберегательный депозит',
+                'accumulation_deposit': 'накопительный депозит'
+            }
+
+            deposit_name = deposit_names.get(product.id, 'депозит')
+
+            return (f"{profile.name}, у вас есть свободные средства на счету. "
+                   f"Разместите их на {deposit_name} под {deposit_rate*100:.1f}% — "
+                   f"дополнительно {potential_income:,.0f} ₸ в год. Открыть депозит.")
+
+        return (f"{profile.name}, откройте депозит под {product.special_conditions['rate']*100:.1f}% "
+               f"для сохранения и приумножения средств. Выбрать депозит.")
+
+    def _generate_investment_push(self, profile: ClientProfile,
+                                behavior: ClientBehavior,
+                                product: BankProduct,
+                                expected_benefit: float) -> str:
+        """Генерация уведомления для инвестиций"""
+
+        if profile.age <= 35:
+            return (f"{profile.name}, начните инвестировать уже сегодня — "
+                   f"первый год без комиссий и минимальный порог от 6 ₸. Открыть счёт.")
+
+        if behavior.investment_activity['has_investment_activity']:
+            return (f"{profile.name}, расширьте инвестиционные возможности — "
+                   f"нулевые комиссии на старте и удобное управление. Открыть счёт.")
+
+        balance = profile.avg_monthly_balance_kzt
+        if balance > 100000:
+            return (f"{profile.name}, попробуйте инвестиции с низким порогом входа "
+                   f"и без комиссий на старт. Начать инвестировать.")
+
+        return (f"{profile.name}, начните инвестиционный путь с минимальными затратами "
+               f"и профессиональной поддержкой. Узнать больше.")
+
+    def _generate_gold_push(self, profile: ClientProfile,
+                          behavior: ClientBehavior,
+                          product: BankProduct,
+                          expected_benefit: float) -> str:
+        """Генерация уведомления для золотых слитков"""
+
+        balance = profile.avg_monthly_balance_kzt
+
+        if balance > 1000000:
+            return (f"{profile.name}, диверсифицируйте портфель золотыми слитками 999,9 пробы. "
+                   f"Надежное сохранение стоимости с возможностью хранения в банке. "
+                   f"Узнать условия.")
+
+        if behavior.investment_activity['has_investment_activity']:
+            return (f"{profile.name}, золотые слитки — классический инструмент "
+                   f"для защиты капитала от инфляции. Добавить в портфель.")
+
+        return (f"{profile.name}, золотые слитки 999,9 пробы для долгосрочного "
+               f"сохранения капитала. Заказать в приложении.")
+
+    def process_all_clients(self, profiles_df: pd.DataFrame,
+                          transactions_df: pd.DataFrame,
+                          transfers_df: pd.DataFrame) -> pd.DataFrame:
+        """Обработка всех клиентов и генерация рекомендаций"""
+
+        logger.info("Загрузка данных клиентов...")
+        clients_data = self.load_client_data(profiles_df, transactions_df, transfers_df)
+
+        results = []
+
+        logger.info("Генерация персональных предложений...")
+        for client_code, (profile, behavior) in clients_data.items():
+            try:
+                # Расчет выгод по всем продуктам
+                benefits = self.calculate_product_benefits(profile, behavior)
+
+                # Выбор лучшего продукта
+                best_product_id = self.select_best_product(benefits)
+
+                if best_product_id:
+                    # Находим продукт
+                    product = next(p for p in self.products_catalog if p.id == best_product_id)
+                    expected_benefit = benefits[best_product_id][0]
+
+                    # Генерируем push-уведомление
+                    push_notification = self.generate_push_notification(
+                        profile, behavior, product, expected_benefit
+                    )
+
+                    results.append({
+                        'client_code': client_code,
+                        'product': product.name,
+                        'push_notification': push_notification
+                    })
                 else:
-                    logger.info(f"{key}: {value}")
-            
-            # Создаем дашборд визуализации
-            create_scoring_dashboard(offers, summary_stats, features_df)
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Scoring system error: {e}")
-            return False
-    
-    return enhanced_main
+                    # Fallback на базовый продукт
+                    fallback_product = self.products_catalog[0]  # Карта для путешествий
+                    push_notification = self.generate_push_notification(
+                        profile, behavior, fallback_product, 0
+                    )
+
+                    results.append({
+                        'client_code': client_code,
+                        'product': fallback_product.name,
+                        'push_notification': push_notification
+                    })
+
+            except Exception as e:
+                logger.error(f"Ошибка обработки клиента {client_code}: {e}")
+                continue
+
+        return pd.DataFrame(results)
+
+    def save_results(self, results_df: pd.DataFrame, output_path: str = "client_recommendations.csv"):
+        """Сохранение результатов в CSV"""
+        results_df.to_csv(output_path, index=False, encoding='utf-8')
+        logger.info(f"Результаты сохранены в {output_path}")
+
+        # Выводим примеры для проверки
+        sample = results_df if len(results_df) <= 5 else results_df.head(5)
+        logger.info("\nПримеры сгенерированных предложений:")
+        for _, row in sample.iterrows():
+            logger.info(f"Клиент {row['client_code']}: {row['product']}")
+            logger.info(f"  Push ({len(row['push_notification'])} символов): {row['push_notification']}")
+            logger.info("")
 
 
-def create_scoring_dashboard(offers: Dict[str, List[ClientOffer]], 
-                           stats: Dict[str, Any], 
-                           features_df: pd.DataFrame):
+    def generate_analytics_report(self, results_df: pd.DataFrame) -> Dict[str, Any]:
+        """Генерация аналитического отчета"""
+
+        product_distribution = results_df['product'].value_counts()
+
+        # Анализ длины уведомлений
+        results_df['push_length'] = results_df['push_notification'].str.len()
+        avg_push_length = results_df['push_length'].mean()
+
+        # Проверка соблюдения лимитов длины (180-220 символов)
+        within_limit = results_df[
+            (results_df['push_length'] >= 180) &
+            (results_df['push_length'] <= 220)
+        ].shape[0]
+
+        report = {
+            'total_clients_processed': len(results_df),
+            'product_distribution': product_distribution.to_dict(),
+            'most_recommended_product': product_distribution.index[0],
+            'avg_push_notification_length': round(avg_push_length, 1),
+            'push_notifications_within_limit': within_limit,
+            'compliance_rate': round(within_limit / len(results_df) * 100, 1)
+        }
+
+        return report
+
+
+# Пример использования системы
+def main():
+    """Главная функция для демонстрации работы системы"""
+
+    # Настройка логирования
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+    logger.info("Инициализация системы персонализированных банковских рекомендаций")
+
+    # Создаем систему
+    system = BankingPersonalizationSystem()
+
+    # Демонстрационные данные (в реальности загружаются из файлов)
+    sample_profiles = pd.DataFrame({
+        'client_code': [1, 2, 3],
+        'name': ['Рамазан', 'Алия', 'Дмитрий'],
+        'status': ['Стандартный клиент', 'Премиальный клиент', 'Студент'],
+        'age': [28, 34, 22],
+        'city': ['Алматы', 'Нур-Султан', 'Шымкент'],
+        'avg_monthly_balance_KZT': [150000, 2500000, 45000]
+    })
+
+    sample_transactions = pd.DataFrame({
+        'client_code': [1, 1, 1, 2, 2, 3],
+        'date': ['2024-08-01', '2024-08-15', '2024-08-20', '2024-08-05', '2024-08-25', '2024-08-10'],
+        'category': ['Такси', 'Такси', 'Путешествия', 'Кафе и рестораны', 'Ювелирные украшения', 'Продукты питания'],
+        'amount': [2500, 3200, 45000, 15000, 85000, 8000],
+        'currency': ['KZT', 'KZT', 'KZT', 'KZT', 'KZT', 'KZT']
+    })
+
+    sample_transfers = pd.DataFrame({
+        'client_code': [1, 2, 3],
+        'date': ['2024-08-01', '2024-08-05', '2024-08-10'],
+        'type': ['salary_in', 'deposit_topup_out', 'stipend_in'],
+        'direction': ['in', 'out', 'in'],
+        'amount': [200000, 500000, 25000],
+        'currency': ['KZT', 'KZT', 'KZT']
+    })
+
+    # Обрабатываем клиентов
+    results = system.process_all_clients(sample_profiles, sample_transactions, sample_transfers)
+
+    # Сохраняем результаты
+    system.save_results(results)
+
+    # Генерируем аналитический отчет
+    analytics = system.generate_analytics_report(results)
+
+    logger.info("Аналитический отчет:")
+    for key, value in analytics.items():
+        logger.info(f"  {key}: {value}")
+
+    return results
+
+
+def create_scoring_dashboard(offers: Dict[str, List[Dict]],
+                             stats: Dict[str, Any],
+                             features_df: pd.DataFrame,
+                             show: bool = True):
     """Создание дашборда с визуализацией скоринга и предложений"""
-    
+
     import matplotlib.pyplot as plt
     import seaborn as sns
-    
-    # Создаем фигуру с множественными субплотами
-    fig = plt.figure(figsize=(20, 15))
-    gs = fig.add_gridspec(3, 3, height_ratios=[1, 1, 1], width_ratios=[1, 1, 1])
-    
-    # 1. Распределение предложений по категориям
-    ax1 = fig.add_subplot(gs[0, 0])
-    categories = list(stats['category_breakdown'].keys())
-    counts = [stats['category_breakdown'][cat]['count'] for cat in categories]
-    colors = plt.cm.Set3(np.linspace(0, 1, len(categories)))
-    
-    ax1.pie(counts, labels=categories, colors=colors, autopct='%1.1f%%', startangle=90)
-    ax1.set_title('Распределение предложений по категориям', fontsize=14, fontweight='bold')
-    
-    # 2. Средние скоры по категориям
-    ax2 = fig.add_subplot(gs[0, 1])
-    scores = [stats['category_breakdown'][cat]['avg_score'] for cat in categories]
-    bars = ax2.bar(categories, scores, color=colors)
-    ax2.set_title('Средние скоры по категориям продуктов', fontsize=14, fontweight='bold')
-    ax2.set_ylabel('Средний скор')
-    ax2.set_xticks(range(len(categories)))
-    ax2.set_xticklabels(categories, rotation=45, ha='right')
-    
-    # Добавляем значения на столбцы
-    for bar, score in zip(bars, scores):
-        height = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width()/2., height + 1,
-                f'{score:.1f}', ha='center', va='bottom')
-    
-    # 3. Ожидаемая выручка по категориям
-    ax3 = fig.add_subplot(gs[0, 2])
-    revenues = [stats['category_breakdown'][cat]['total_revenue'] for cat in categories]
-    bars = ax3.bar(categories, revenues, color=colors)
-    ax3.set_title('Ожидаемая выручка по категориям (KZT)', fontsize=14, fontweight='bold')
-    ax3.set_ylabel('Выручка (KZT)')
-    ax3.set_xticks(range(len(categories)))
-    ax3.set_xticklabels(categories, rotation=45, ha='right')
-    
-    # Форматируем значения
-    ax3.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x/1e6:.1f}M'))
-    
-    # 4. Топ клиенты по потенциальной выручке
-    ax4 = fig.add_subplot(gs[1, 0])
-    
-    # Собираем данные по клиентам
-    client_revenues = {}
-    for client_code, client_offers in offers.items():
-        total_revenue = sum(offer.expected_revenue for offer in client_offers)
-        client_revenues[client_code] = total_revenue
-    
-    # Топ 10 клиентов
-    top_clients = sorted(client_revenues.items(), key=lambda x: x[1], reverse=True)[:10]
-    client_codes = [f"Client_{str(code)[-2:]}" for code, _ in top_clients]
-    revenues = [revenue for _, revenue in top_clients]
-    
-    bars = ax4.barh(client_codes, revenues, color='lightblue')
-    ax4.set_title('Топ-10 клиентов по потенциальной выручке', fontsize=14, fontweight='bold')
-    ax4.set_xlabel('Ожидаемая выручка (KZT)')
-    
-    # 5. Распределение балансов клиентов
-    ax5 = fig.add_subplot(gs[1, 1])
-    balances = features_df['avg_monthly_balance_KZT'].values
-    balances_filtered = balances[balances > 0]  # Убираем нули для лучшей визуализации
-    
-    ax5.hist(balances_filtered, bins=50, color='lightgreen', alpha=0.7, edgecolor='black')
-    ax5.set_title('Распределение балансов клиентов', fontsize=14, fontweight='bold')
-    ax5.set_xlabel('Средний месячный баланс (KZT)')
-    ax5.set_ylabel('Количество клиентов')
-    ax5.set_xscale('log')  # Логарифмическая шкала из-за большого разброса
-    
-    # 6. Корреляция между тратами и количеством транзакций
-    ax6 = fig.add_subplot(gs[1, 2])
-    spending = features_df['total_spending'].values
-    tx_counts = features_df['tx_count'].values
-    
-    # Убираем выбросы для лучшей визуализации
-    mask = (spending > 0) & (tx_counts > 0)
-    spending_clean = spending[mask]
-    tx_counts_clean = tx_counts[mask]
-    
-    ax6.scatter(tx_counts_clean, spending_clean, alpha=0.6, color='coral', s=20)
-    ax6.set_title('Связь между активностью и тратами', fontsize=14, fontweight='bold')
-    ax6.set_xlabel('Количество транзакций')
-    ax6.set_ylabel('Общие траты (KZT)')
-    
-    # Добавляем линию тренда
-    z = np.polyfit(tx_counts_clean, spending_clean, 1)
-    p = np.poly1d(z)
-    ax6.plot(tx_counts_clean, p(tx_counts_clean), "r--", alpha=0.8)
-    
-    # 7. Heatmap популярных категорий трат
-    ax7 = fig.add_subplot(gs[2, :])
-    
-    # Выбираем топ категории трат
-    spending_categories = [
-        'Продукты питания', 'Кафе и рестораны', 'Одежда и обувь', 'АЗС',
-        'Медицина', 'Развлечения', 'Спорт', 'Такси', 'Путешествия'
-    ]
-    
-    available_categories = [cat for cat in spending_categories if cat in features_df.columns]
-    
-    if available_categories:
-        # Создаем матрицу трат по категориям для топ-20 клиентов
-        top_spenders = features_df.nlargest(20, 'total_spending')
-        category_data = top_spenders[['client_code'] + available_categories].set_index('client_code')
-        
-        # Нормализуем данные для лучшей визуализации
-        category_data_norm = category_data.div(category_data.sum(axis=1), axis=0) * 100
-        
-        sns.heatmap(category_data_norm.T, ax=ax7, cmap='YlOrRd', 
-                   cbar_kws={'label': 'Доля трат (%)'}, fmt='.1f')
-        ax7.set_title('Профили трат топ-20 клиентов по категориям', fontsize=14, fontweight='bold')
-        ax7.set_xlabel('Клиенты')
-        ax7.set_ylabel('Категории трат')
-        
-        # Улучшаем читаемость
-        ax7.set_xticklabels([f'C{i+1}' for i in range(len(top_spenders))], rotation=0)
-        ax7.set_yticklabels(available_categories, rotation=0)
-    
-    plt.tight_layout()
-    os.makedirs("../reports/figures", exist_ok=True)
-    plt.savefig('../reports/figures/scoring_dashboard.png', dpi=300, bbox_inches='tight')
-    plt.show()
-    
-    logger.info("Scoring dashboard saved to reports/figures/scoring_dashboard.png")
+    import numpy as np
+    import os
+
+    # Настройка шрифтов для корректного отображения русского текста
+    plt.rcParams['font.family'] = ['DejaVu Sans', 'Liberation Sans', 'Arial Unicode MS', 'sans-serif']
+    plt.rcParams['axes.unicode_minus'] = False
+
+    try:
+        # Создаем фигуру с сеткой 3x3
+        fig = plt.figure(figsize=(20, 15))
+        gs = fig.add_gridspec(3, 3, height_ratios=[1, 1, 1], width_ratios=[1, 1, 1])
+
+        # Проверяем наличие данных в stats
+        if not stats or 'product_distribution' not in stats:
+            logger.warning("Stats не содержат необходимых данных для дашборда")
+            # Создаем базовую статистику из offers
+            stats = create_stats_from_offers(offers)
+
+        # 1. Распределение предложений по продуктам
+        ax1 = fig.add_subplot(gs[0, 0])
+        try:
+            if 'product_distribution' in stats and stats['product_distribution']:
+                products = list(stats['product_distribution'].keys())
+                counts = list(stats['product_distribution'].values())
+                colors = plt.cm.Set3(np.linspace(0, 1, len(products)))
+
+                wedges, texts, autotexts = ax1.pie(counts, labels=products, colors=colors,
+                                                   autopct='%1.1f%%', startangle=90)
+                # Улучшаем читаемость текста
+                for autotext in autotexts:
+                    autotext.set_color('white')
+                    autotext.set_fontweight('bold')
+                    autotext.set_fontsize(8)
+
+                ax1.set_title('Распределение предложений по продуктам', fontsize=12, fontweight='bold', pad=20)
+            else:
+                ax1.text(0.5, 0.5, 'Нет данных\nо продуктах', ha='center', va='center',
+                         transform=ax1.transAxes, fontsize=14)
+                ax1.set_title('Распределение продуктов', fontsize=12, fontweight='bold')
+        except Exception as e:
+            logger.error(f"Ошибка создания pie chart: {e}")
+            ax1.text(0.5, 0.5, f'Ошибка:\n{str(e)[:50]}', ha='center', va='center',
+                     transform=ax1.transAxes, fontsize=10)
+
+        # 2. Средние значения по продуктам (если есть product_stats)
+        ax2 = fig.add_subplot(gs[0, 1])
+        try:
+            if 'product_stats' in stats and stats['product_stats']:
+                products = list(stats['product_stats'].keys())
+                # Используем разные метрики в зависимости от доступных данных
+                if 'avg_benefit' in list(stats['product_stats'].values())[0]:
+                    values = [stats['product_stats'][prod]['avg_benefit'] for prod in products]
+                    ylabel = 'Средняя выгода (₸)'
+                    title = 'Средняя выгода по продуктам'
+                else:
+                    values = [stats['product_stats'][prod].get('count', 0) for prod in products]
+                    ylabel = 'Количество предложений'
+                    title = 'Количество предложений по продуктам'
+
+                colors = plt.cm.Set3(np.linspace(0, 1, len(products)))
+                bars = ax2.bar(range(len(products)), values, color=colors)
+
+                ax2.set_title(title, fontsize=12, fontweight='bold')
+                ax2.set_ylabel(ylabel, fontsize=10)
+                ax2.set_xticks(range(len(products)))
+                ax2.set_xticklabels([prod[:15] + '...' if len(prod) > 15 else prod
+                                     for prod in products], rotation=45, ha='right', fontsize=8)
+
+                # Добавляем значения на столбцы
+                for bar, value in zip(bars, values):
+                    height = bar.get_height()
+                    if height > 0:
+                        ax2.text(bar.get_x() + bar.get_width() / 2., height + max(values) * 0.01,
+                                 f'{value:,.0f}', ha='center', va='bottom', fontsize=8)
+            else:
+                ax2.text(0.5, 0.5, 'Нет данных\nо статистике\nпродуктов', ha='center', va='center',
+                         transform=ax2.transAxes, fontsize=12)
+                ax2.set_title('Статистика продуктов', fontsize=12, fontweight='bold')
+        except Exception as e:
+            logger.error(f"Ошибка создания bar chart: {e}")
+            ax2.text(0.5, 0.5, f'Ошибка:\n{str(e)[:30]}', ha='center', va='center',
+                     transform=ax2.transAxes, fontsize=10)
+
+        # 3. Общая статистика
+        ax3 = fig.add_subplot(gs[0, 2])
+        try:
+            # Создаем текстовую сводку
+            summary_text = f"Всего предложений: {stats.get('total_offers', 0)}\n"
+            summary_text += f"Уникальных клиентов: {stats.get('unique_clients', len(offers))}\n"
+
+            if 'total_expected_revenue' in stats:
+                revenue = stats['total_expected_revenue']
+                summary_text += f"Ожидаемая выручка: {revenue:,.0f} ₸\n"
+
+            if 'avg_benefit_per_client' in stats:
+                avg_benefit = stats['avg_benefit_per_client']
+                summary_text += f"Средняя выгода: {avg_benefit:,.0f} ₸\n"
+
+            if 'avg_confidence' in stats:
+                confidence = stats['avg_confidence']
+                summary_text += f"Средняя уверенность: {confidence:.1f}%"
+
+            ax3.text(0.1, 0.9, summary_text, transform=ax3.transAxes, fontsize=12,
+                     verticalalignment='top', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue"))
+            ax3.set_title('Общая статистика', fontsize=12, fontweight='bold')
+            ax3.axis('off')
+        except Exception as e:
+            logger.error(f"Ошибка создания summary: {e}")
+            ax3.text(0.5, 0.5, f'Ошибка:\n{str(e)[:30]}', ha='center', va='center',
+                     transform=ax3.transAxes, fontsize=10)
+
+        # 4. Анализ клиентов (если есть данные)
+        ax4 = fig.add_subplot(gs[1, 0])
+        try:
+            if not features_df.empty and 'avg_monthly_balance_KZT' in features_df.columns:
+                balances = features_df['avg_monthly_balance_KZT']
+                balances_clean = balances[balances > 0]
+
+                if len(balances_clean) > 0:
+                    ax4.hist(balances_clean, bins=min(30, len(balances_clean) // 2),
+                             color='lightgreen', alpha=0.7, edgecolor='black')
+                    ax4.set_title('Распределение балансов', fontsize=12, fontweight='bold')
+                    ax4.set_xlabel('Баланс (₸)', fontsize=10)
+                    ax4.set_ylabel('Количество клиентов', fontsize=10)
+
+                    # Логарифмическая шкала если большой разброс
+                    if balances_clean.max() / balances_clean.min() > 100:
+                        ax4.set_xscale('log')
+                else:
+                    ax4.text(0.5, 0.5, 'Нет данных\nо балансах', ha='center', va='center',
+                             transform=ax4.transAxes, fontsize=12)
+            else:
+                ax4.text(0.5, 0.5, 'Нет данных\nо клиентах', ha='center', va='center',
+                         transform=ax4.transAxes, fontsize=12)
+                ax4.set_title('Анализ клиентов', fontsize=12, fontweight='bold')
+        except Exception as e:
+            logger.error(f"Ошибка анализа балансов: {e}")
+            ax4.text(0.5, 0.5, f'Ошибка:\n{str(e)[:30]}', ha='center', va='center',
+                     transform=ax4.transAxes, fontsize=10)
+
+        # 5. Активность клиентов
+        ax5 = fig.add_subplot(gs[1, 1])
+        try:
+            if not features_df.empty:
+                # Ищем колонки с транзакциями или тратами
+                spending_cols = [col for col in features_df.columns
+                                 if 'total_spending' in col or 'tx_count' in col or 'amount' in col.lower()]
+
+                if len(spending_cols) >= 2:
+                    x_col, y_col = spending_cols[:2]
+                    x_data = features_df[x_col].dropna()
+                    y_data = features_df[y_col].dropna()
+
+                    # Берем пересечение индексов
+                    common_idx = x_data.index.intersection(y_data.index)
+                    if len(common_idx) > 1:
+                        x_clean = x_data.loc[common_idx]
+                        y_clean = y_data.loc[common_idx]
+
+                        ax5.scatter(x_clean, y_clean, alpha=0.6, color='coral', s=20)
+                        ax5.set_xlabel(x_col, fontsize=10)
+                        ax5.set_ylabel(y_col, fontsize=10)
+                        ax5.set_title('Активность клиентов', fontsize=12, fontweight='bold')
+
+                        # Добавляем трендлинию если достаточно точек
+                        if len(x_clean) > 2:
+                            try:
+                                z = np.polyfit(x_clean, y_clean, 1)
+                                p = np.poly1d(z)
+                                ax5.plot(x_clean, p(x_clean), "r--", alpha=0.8)
+                            except:
+                                pass
+                    else:
+                        ax5.text(0.5, 0.5, 'Недостаточно\nданных для\nанализа',
+                                 ha='center', va='center', transform=ax5.transAxes, fontsize=12)
+                else:
+                    ax5.text(0.5, 0.5, 'Нет данных\nо активности', ha='center', va='center',
+                             transform=ax5.transAxes, fontsize=12)
+            else:
+                ax5.text(0.5, 0.5, 'Нет данных\nо клиентах', ha='center', va='center',
+                         transform=ax5.transAxes, fontsize=12)
+
+            ax5.set_title('Активность клиентов', fontsize=12, fontweight='bold')
+        except Exception as e:
+            logger.error(f"Ошибка анализа активности: {e}")
+            ax5.text(0.5, 0.5, f'Ошибка:\n{str(e)[:30]}', ha='center', va='center',
+                     transform=ax5.transAxes, fontsize=10)
+
+        # 6. Топ клиенты
+        ax6 = fig.add_subplot(gs[1, 2])
+        try:
+            if offers and isinstance(offers, dict):
+                # Вычисляем метрику для каждого клиента
+                client_metrics = {}
+                for client_code, client_offers in offers.items():
+                    if client_offers:
+                        # Берем максимальную выгоду или количество предложений
+                        if isinstance(client_offers[0], dict) and 'expected_benefit' in client_offers[0]:
+                            metric = sum(offer.get('expected_benefit', 0) for offer in client_offers)
+                        else:
+                            metric = len(client_offers)
+                        client_metrics[client_code] = metric
+
+                if client_metrics:
+                    # Топ-10 клиентов
+                    top_clients = sorted(client_metrics.items(), key=lambda x: x[1], reverse=True)[:10]
+
+                    if top_clients:
+                        client_codes = [f"Клиент {str(code)[-3:]}" for code, _ in top_clients]
+                        values = [metric for _, metric in top_clients]
+
+                        ax6.barh(client_codes, values, color='lightblue')
+                        ax6.set_title('Топ-10 клиентов', fontsize=12, fontweight='bold')
+                        ax6.set_xlabel('Метрика', fontsize=10)
+
+                        # Поворачиваем подписи для лучшей читаемости
+                        ax6.tick_params(axis='y', labelsize=8)
+                    else:
+                        ax6.text(0.5, 0.5, 'Нет данных\nо топ клиентах', ha='center', va='center',
+                                 transform=ax6.transAxes, fontsize=12)
+                else:
+                    ax6.text(0.5, 0.5, 'Нет метрик\nдля клиентов', ha='center', va='center',
+                             transform=ax6.transAxes, fontsize=12)
+            else:
+                ax6.text(0.5, 0.5, 'Нет данных\nо предложениях', ha='center', va='center',
+                         transform=ax6.transAxes, fontsize=12)
+
+            ax6.set_title('Топ клиенты', fontsize=12, fontweight='bold')
+        except Exception as e:
+            logger.error(f"Ошибка анализа топ клиентов: {e}")
+            ax6.text(0.5, 0.5, f'Ошибка:\n{str(e)[:30]}', ha='center', va='center',
+                     transform=ax6.transAxes, fontsize=10)
+
+        # 7. Heatmap категорий трат (занимает всю нижнюю строку)
+        ax7 = fig.add_subplot(gs[2, :])
+        try:
+            if not features_df.empty:
+                # Ищем категории трат
+                spending_categories = [col for col in features_df.columns
+                                       if any(cat in col for cat in ['Продукты', 'Кафе', 'Одежда', 'АЗС',
+                                                                     'Медицина', 'Развлечения', 'Спорт',
+                                                                     'Такси', 'Путешествия'])]
+
+                if len(spending_categories) > 2:
+                    # Берем топ клиентов по общим тратам
+                    total_spending_col = None
+                    for col in features_df.columns:
+                        if 'total_spending' in col.lower() or 'общие_траты' in col.lower():
+                            total_spending_col = col
+                            break
+
+                    if total_spending_col:
+                        top_spenders = features_df.nlargest(min(20, len(features_df)), total_spending_col)
+                    else:
+                        top_spenders = features_df.head(min(20, len(features_df)))
+
+                    # Создаем матрицу для heatmap
+                    if not top_spenders.empty and len(spending_categories) > 0:
+                        # Берем только доступные категории
+                        available_categories = [cat for cat in spending_categories if cat in top_spenders.columns]
+
+                        if available_categories:
+                            category_data = top_spenders[available_categories]
+
+                            # Нормализуем по строкам (процент от общих трат клиента)
+                            row_sums = category_data.sum(axis=1)
+                            category_data_norm = category_data.div(row_sums, axis=0) * 100
+                            category_data_norm = category_data_norm.fillna(0)
+
+                            # Создаем heatmap
+                            sns.heatmap(category_data_norm.T, ax=ax7, cmap='YlOrRd',
+                                        cbar_kws={'label': 'Доля трат (%)'},
+                                        xticklabels=[f'К{i + 1}' for i in range(len(top_spenders))],
+                                        yticklabels=[cat[:20] + '...' if len(cat) > 20 else cat
+                                                     for cat in available_categories])
+
+                            ax7.set_title('Профили трат клиентов по категориям', fontsize=12, fontweight='bold')
+                            ax7.set_xlabel('Клиенты', fontsize=10)
+                            ax7.set_ylabel('Категории', fontsize=10)
+                        else:
+                            ax7.text(0.5, 0.5, 'Нет данных\nо категориях трат', ha='center', va='center',
+                                     transform=ax7.transAxes, fontsize=12)
+                    else:
+                        ax7.text(0.5, 0.5, 'Недостаточно\nданных для\nheatmap', ha='center', va='center',
+                                 transform=ax7.transAxes, fontsize=12)
+                else:
+                    ax7.text(0.5, 0.5, 'Нет данных\nо категориях\nтрат', ha='center', va='center',
+                             transform=ax7.transAxes, fontsize=12)
+            else:
+                ax7.text(0.5, 0.5, 'Нет данных\nо клиентах', ha='center', va='center',
+                         transform=ax7.transAxes, fontsize=12)
+
+            ax7.set_title('Анализ категорий трат', fontsize=12, fontweight='bold')
+        except Exception as e:
+            logger.error(f"Ошибка создания heatmap: {e}")
+            ax7.text(0.5, 0.5, f'Ошибка создания heatmap:\n{str(e)[:50]}',
+                     ha='center', va='center', transform=ax7.transAxes, fontsize=10)
+
+        plt.tight_layout(pad=3.0)
+
+        # Сохранение
+        os.makedirs("reports/figures", exist_ok=True)
+        output_path = "reports/figures/scoring_dashboard.png"
+        plt.savefig(output_path, dpi=300, bbox_inches='tight', facecolor='white')
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        logger.info(f"Dashboard сохранен в {output_path}")
+
+    except Exception as e:
+        logger.error(f"Критическая ошибка создания dashboard: {e}")
+        # Создаем базовый дашборд с сообщением об ошибке
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.text(0.5, 0.5, f'Ошибка создания дашборда:\n{str(e)}\n\nПроверьте данные и повторите попытку',
+                ha='center', va='center', transform=ax.transAxes, fontsize=14,
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="lightcoral"))
+        ax.set_title('Ошибка Dashboard', fontsize=16, fontweight='bold')
+        ax.axis('off')
+
+        os.makedirs("reports/figures", exist_ok=True)
+        plt.savefig("reports/figures/scoring_dashboard_error.png", dpi=300, bbox_inches='tight')
+        if show:
+            plt.show()
+        plt.close(fig)
 
 
-# Дополнительные утилиты для работы со скорингом
+def create_stats_from_offers(offers: Dict[str, List[Dict]]) -> Dict[str, Any]:
+    """Создание базовой статистики из offers если stats пустой"""
 
-class OfferOptimizer:
-    """Оптимизатор предложений для максимизации прибыли банка"""
-    
-    def __init__(self, capacity_constraints: Dict[str, int] = None):
-        """
-        Args:
-            capacity_constraints: Ограничения по количеству продуктов каждого типа
-        """
-        self.capacity_constraints = capacity_constraints or {
-            'credit_card': 1000,
-            'personal_loan': 500,
-            'deposit': 2000,
-            'investment': 200,
-            'insurance': 800
-        }
-    
-    def optimize_offer_allocation(self, all_offers: Dict[str, List[ClientOffer]]) -> Dict[str, List[ClientOffer]]:
-        """
-        Оптимизация распределения предложений с учетом ограничений
-        Использует жадный алгоритм для максимизации общей выручки
-        """
-        
-        # Создаем список всех предложений с метаданными
-        offer_list = []
-        for client_code, client_offers in all_offers.items():
-            for offer in client_offers:
-                offer_list.append({
-                    'client_code': client_code,
-                    'offer': offer,
-                    'revenue_per_score': offer.expected_revenue / max(offer.score, 1),
-                    'efficiency': offer.expected_revenue * offer.score / 100
-                })
-        
-        # Сортируем по эффективности (выручка * вероятность принятия)
-        offer_list.sort(key=lambda x: x['efficiency'], reverse=True)
-        
-        # Отслеживаем использованные квоты
-        used_capacity = {category: 0 for category in self.capacity_constraints}
-        selected_offers = {}
-        
-        # Жадный отбор предложений
-        for offer_data in offer_list:
-            offer = offer_data['offer']
-            client_code = offer_data['client_code']
-            category = offer.product.category
-            
-            # Проверяем доступность квоты
-            if used_capacity[category] < self.capacity_constraints[category]:
-                
-                # Добавляем предложение
-                if client_code not in selected_offers:
-                    selected_offers[client_code] = []
-                
-                selected_offers[client_code].append(offer)
-                used_capacity[category] += 1
-        
-        logger.info("Offer allocation optimized:")
-        for category, used in used_capacity.items():
-            logger.info(f"  {category}: {used}/{self.capacity_constraints[category]} used")
-        
-        return selected_offers
+    if not offers:
+        return {'total_offers': 0, 'unique_clients': 0, 'product_distribution': {}}
 
+    all_offers = []
+    for client_offers in offers.values():
+        all_offers.extend(client_offers)
 
-class ABTestFramework:
-    """Фреймворк для A/B тестирования предложений"""
-    
-    def __init__(self):
-        self.test_groups = {}
-        self.results = {}
-    
-    def create_ab_test(self, 
-                      offers: Dict[str, List[ClientOffer]], 
-                      test_name: str,
-                      variant_a_ratio: float = 0.5) -> Dict[str, Any]:
-        """
-        Создание A/B теста для предложений
-        
-        Args:
-            offers: Словарь предложений
-            test_name: Название теста
-            variant_a_ratio: Доля клиентов в группе A
-        """
-        
-        client_codes = list(offers.keys())
-        np.random.shuffle(client_codes)
-        
-        split_point = int(len(client_codes) * variant_a_ratio)
-        
-        group_a = client_codes[:split_point]
-        group_b = client_codes[split_point:]
-        
-        self.test_groups[test_name] = {
-            'group_a': group_a,
-            'group_b': group_b,
-            'variant_a_ratio': variant_a_ratio,
-            'total_clients': len(client_codes)
-        }
-        
-        logger.info(f"A/B test '{test_name}' created:")
-        logger.info(f"  Group A: {len(group_a)} clients")
-        logger.info(f"  Group B: {len(group_b)} clients")
-        
-        return self.test_groups[test_name]
-    
-    def simulate_test_results(self, test_name: str, 
-                            base_conversion_rate: float = 0.15,
-                            effect_size: float = 0.02) -> Dict[str, Any]:
-        """
-        Симуляция результатов A/B теста
-        
-        Args:
-            test_name: Название теста
-            base_conversion_rate: Базовый коэффициент конверсии
-            effect_size: Размер эффекта (разница между группами)
-        """
-        
-        if test_name not in self.test_groups:
-            raise ValueError(f"Test '{test_name}' not found")
-        
-        test_data = self.test_groups[test_name]
-        
-        # Симулируем результаты
-        group_a_size = len(test_data['group_a'])
-        group_b_size = len(test_data['group_b'])
-        
-        # Группа A - контрольная
-        group_a_conversions = np.random.binomial(group_a_size, base_conversion_rate)
-        
-        # Группа B - с улучшением
-        group_b_conversions = np.random.binomial(group_b_size, base_conversion_rate + effect_size)
-        
-        # Расчет метрик
-        conv_rate_a = group_a_conversions / group_a_size
-        conv_rate_b = group_b_conversions / group_b_size
-        
-        # Простой тест значимости
-        from scipy.stats import chi2_contingency
-        
-        contingency_table = [
-            [group_a_conversions, group_a_size - group_a_conversions],
-            [group_b_conversions, group_b_size - group_b_conversions]
-        ]
-        
-        chi2, p_value, _, _ = chi2_contingency(contingency_table)
-        
-        results = {
-            'group_a_conversion_rate': conv_rate_a,
-            'group_b_conversion_rate': conv_rate_b,
-            'relative_improvement': (conv_rate_b - conv_rate_a) / conv_rate_a * 100,
-            'absolute_difference': conv_rate_b - conv_rate_a,
-            'statistical_significance': p_value < 0.05,
-            'p_value': p_value,
-            'confidence_level': 95,
-            'recommendation': 'Deploy variant B' if (conv_rate_b > conv_rate_a and p_value < 0.05) else 'Keep variant A'
-        }
-        
-        self.results[test_name] = results
-        
-        logger.info(f"A/B test '{test_name}' results:")
-        logger.info(f"  Group A conversion: {conv_rate_a:.1%}")
-        logger.info(f"  Group B conversion: {conv_rate_b:.1%}")
-        logger.info(f"  Relative improvement: {results['relative_improvement']:+.1f}%")
-        logger.info(f"  Statistical significance: {results['statistical_significance']}")
-        logger.info(f"  Recommendation: {results['recommendation']}")
-        
-        return results
+    product_distribution = {}
+    for offer in all_offers:
+        product = offer.get('product', 'Неизвестный продукт')
+        product_distribution[product] = product_distribution.get(product, 0) + 1
+
+    return {
+        'total_offers': len(all_offers),
+        'unique_clients': len(offers),
+        'product_distribution': product_distribution
+    }
+
+if __name__ == "__main__":
+    results = main()
