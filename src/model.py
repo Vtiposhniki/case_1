@@ -31,7 +31,7 @@ class ModelManager:
         # Готовим Pool
         train_pool = Pool(X, y, cat_features=cat_features)
 
-        # Инициализация модели
+        #  Инициализация модели
         model = CatBoostClassifier(
             iterations=500,
             learning_rate=0.05,

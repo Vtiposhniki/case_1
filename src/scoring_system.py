@@ -1305,7 +1305,7 @@ def create_scoring_dashboard(offers: Dict[str, List[Dict]],
 
 
 def create_stats_from_offers(offers: Dict[str, List[Dict]]) -> Dict[str, Any]:
-    """Создание базовой статистики из offers если stats пустой"""
+    """ Создание базовой статистики из offers если stats пустой"""
 
     if not offers:
         return {'total_offers': 0, 'unique_clients': 0, 'product_distribution': {}}

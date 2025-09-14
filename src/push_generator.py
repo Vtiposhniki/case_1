@@ -272,7 +272,7 @@ def generate_push_report(push_messages: List[Dict], output_path: str = "reports/
         "recommendations": []
     }
 
-    # Добавляем рекомендации
+    #  Добавляем рекомендации
     if validation_results["compliance_rate"] < 90:
         report["recommendations"].append("Необходимо улучшить соответствие требованиям длины сообщений")
 

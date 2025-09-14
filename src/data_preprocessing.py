@@ -236,7 +236,7 @@ class DataPreprocessor:
                     continue
 
                 combined_data.append(df)
-                # self.logger.info(f"Loaded {len(df)} records from {filename}")
+                #  self.logger.info(f"Loaded {len(df)} records from {filename}")
 
             except Exception as e:
                 error_msg = f"Error loading {filename}: {e}"

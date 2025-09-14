@@ -31,7 +31,7 @@ def main():
         Path("reports").mkdir(exist_ok=True)
         Path("reports/figures").mkdir(exist_ok=True)
 
-        # 1.  Data Preprocessing
+        # 1.Data Preprocessing
         print("🚀 Step 1: Data Preprocessing...")
         logger.info("Начало предобработки данных")
 
@@ -40,7 +40,7 @@ def main():
 
         logger.info("Предобработка данных завершена")
 
-        # 2. Feature Engineering
+        # 2.Feature Engineering
         print("🚀 Step 2: Feature Engineering...")
         logger.info("Начало инженерии признаков")
 
