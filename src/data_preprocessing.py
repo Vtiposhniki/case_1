@@ -297,7 +297,7 @@ class DataPreprocessor:
         return summary
 
 
-def main():
+def start():
     """Main function to run the data preprocessing."""
     try:
         # Create preprocessor with default config
@@ -317,7 +317,3 @@ def main():
         print(f"Data preprocessing error: {e}")
     except Exception as e:
         print(f"Unexpected error: {e}")
-
-
-if __name__ == "__main__":
-    main()

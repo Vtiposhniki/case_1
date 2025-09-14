@@ -279,7 +279,7 @@ class FeatureEngineering:
             return False
 
 
-def main():
+def allow_actions():
     """Main execution function"""
     # Initialize with default configurations
     feature_engineer = FeatureEngineering()
@@ -306,7 +306,3 @@ def main():
     print(feature_engineer.features_df.head())
 
     return 0
-
-
-if __name__ == "__main__":
-    exit(main())
